@@ -35,7 +35,6 @@ for line in [x.strip().split() for x in open(ENSEMBL_TO_GENE_NAME)]:
 # load string alises (translates ENSP -> ENST/ENSG)
 ensp_to_enst = defaultdict(list)
 enst_to_ensp = {}
-##ensp_to_ensg = defaultdict(list)
 
 for line in [x.strip().split() for x in open(STRING_NETWORK_ALIAS)]:
     if line[2].startswith("ENST"):
@@ -43,16 +42,6 @@ for line in [x.strip().split() for x in open(STRING_NETWORK_ALIAS)]:
 
         assert line[2] not in enst_to_ensp
         enst_to_ensp[line[2]] = line[1]
-
-##    if line[2].startswith("ENSG"):
-##        ensp_to_enst[line[1]].append(line[2])
-
-# load STRING network
-ensp_graph = networkx.Graph()
-skipped_nodes = []
-
-for line in [x.strip().split() for x in open(STRING_NETWORK_LINKS)]:
-    ensp_graph.add_edge(line[0][5:], line[1][5:], weight=float(line[2]))
 
 # using above data, try to map ENSP in network to gene names and back
 ensp_to_gene_name = {}
@@ -69,6 +58,13 @@ for ensp in ensp_graph.nodes():
 
     for name in gene_names:
         gene_name_to_ensp[name].append(ensp)
+
+# generate STRING graph with gene names
+gene_graph = networkx.Graph()
+gene_graph.add_nodes(gene_name_to_ensp.keys())
+
+for line in [x.strip().split() for x in open(STRING_NETWORK_LINKS)]:
+    gene_graph.add_edge(ensp_to_gene_name[line[0][5:]], ensp_to_gene_name[line[1][5:]], weight=float(line[2]))
 
 # retrieve allele frequencies of SNPs in given region from 1000 genomes
 def fetch_af_in_region(chrom, start, end):
