@@ -1,3 +1,4 @@
+from scipy.sparse import dok_matrix
 import time
 import itertools
 import sys
@@ -75,12 +76,94 @@ def find_connected_genes(node_list, max_depth, graph):
 
     return set(connected_nodes)
 
+# load specified cols from VCF into sparse matrix
+def load_snps_to_matrix(vcf_in, cols):
+    matrix = {}
+
+    for index in range(len(cols)):
+        matrix[index] = dok_matrix((25, 250000000), dtype="string")
+
+    for line in open(vcf_in):
+        if line.startswith("#"):
+            if line.startswith("#CHROM"):
+                header = line.strip().split()
+                kept_cols = [header.index(x) for x in cols]
+
+            continue
+
+        line_split = line.strip().split()
+
+        if line_split[0] == "X":
+            chrom = 23
+        elif line_split[0] == "Y":
+            chrom = 24
+        else:
+            chrom = int(line_split[0]) 
+
+        for matrix_index, col_num in enumerate(kept_cols):
+            pos = int(line_split[1])
+            ref = line_split[3]
+            alt = [(str(x + 1), y) for x, y in enumerate(line_split[4].split(","))]
+
+            code = dict([(str(0), ref)] + alt)
+
+            sample = line_split[col_num][:3]
+            sample_coded = reduce(lambda x, y: x.replace(y, code[y]), code, sample)
+
+            matrix[matrix_index][chrom, pos] = sample_coded
+
+    return matrix
+
+# mendelian inheritance filter on sparse matrix
+def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
+    """
+    matrix[0,1,2] = sparsearray(0:24, 0:N, dtype="string")
+    pattern in ("recessive", "compound_het", "compound_het_denovo", "denovo_dominant")
+    """
+ 
+    if pedigree == "default":
+        pedigree = {"child": 0, "mother": 1, "father": 2}
+ 
+    mother, father, child = [matrix[pedigree[x]][chrom,start:end] for x in ("mother", "father", "child")]
+ 
+    # all must have same positions
+    mother_pos = [pos for (_, pos), _ in mother.iteritems()]
+    father_pos = [pos for (_, pos), _ in father.iteritems()]
+    child_pos = [pos for (_, pos), _ in child.iteritems()]
+ 
+    assert len(set(mother_pos).difference(father_pos)) == 0
+    assert len(set(father_pos).difference(child_pos)) == 0
+ 
+    if pattern == "recessive":
+        for pos in mother_pos:
+            mother_genotype = mother[0, pos].split("/")
+            father_genotype = father[0, pos].split("/")
+            child_genotype = child[0, pos].split("/")
+
+            # homozygous in child, heterozygous in both parents
+            if len(set(child_genotype)) == 1 and \
+               len(set(mother_genotype)) == 2 and \
+               len(set(father_genotype)) == 2:
+                print chrom, pos + start, child[0, pos], mother[0, pos], father[0, pos]
+
+    if pattern == "denovo_dominant":
+        for pos in mother_pos:
+            mother_genotype = mother[0, pos].split("/")
+            father_genotype = father[0, pos].split("/")
+            child_genotype = child[0, pos].split("/")
+
+            # homozygous in both parents
+            if len(set(mother_genotype)) == 2 and \
+               len(set(father_genotype)) == 2:
+                # at least one allele in child must not be in either parent
+                if len(set(child_genotype).difference(mother_genotype)) > 0 and \
+                   len(set(child_genotype).difference(father_genotype)) > 0:
+                    print chrom, pos + start, child[0, pos], mother[0, pos], father[0, pos]
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print "usage: %s score_cutoff_float gene_name1 [gene_name2 gene_name3]" % sys.argv[0]
         sys.exit(1)
-
-    import pdb; pdb.set_trace()
 
     # load ensGene (contains chrom:start-end shit)
     enst = {}
