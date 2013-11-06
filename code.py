@@ -1,3 +1,5 @@
+import numpy
+import scipy
 from scipy.sparse import dok_matrix
 import time
 import itertools
@@ -133,6 +135,8 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
  
     assert len(set(mother_pos).difference(father_pos)) == 0
     assert len(set(father_pos).difference(child_pos)) == 0
+
+    hits = []
  
     if pattern == "recessive":
         for pos in mother_pos:
@@ -144,7 +148,7 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
             if len(set(child_genotype)) == 1 and \
                len(set(mother_genotype)) == 2 and \
                len(set(father_genotype)) == 2:
-                print chrom, pos + start, child[0, pos], mother[0, pos], father[0, pos]
+                hits.append((chrom, pos + start)) #, child[0, pos], mother[0, pos], father[0, pos]))
 
     if pattern == "denovo_dominant":
         for pos in mother_pos:
@@ -158,7 +162,13 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
                 # at least one allele in child must not be in either parent
                 if len(set(child_genotype).difference(mother_genotype)) > 0 and \
                    len(set(child_genotype).difference(father_genotype)) > 0:
-                    print chrom, pos + start, child[0, pos], mother[0, pos], father[0, pos]
+                    hits.append((chrom, pos + start)) #, child[0, pos], mother[0, pos], father[0, pos]))
+
+    return hits
+
+# newell-ikeda poisson distributed scan statistic
+def newell_ikeda(k, pois_lambda, T, w):
+    return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / scipy.misc.factorial(k - 1, exact=True))
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
