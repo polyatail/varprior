@@ -136,33 +136,28 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
     assert len(set(mother_pos).difference(father_pos)) == 0
     assert len(set(father_pos).difference(child_pos)) == 0
 
+    mother_genotype = mother[0, pos].split("/")
+    father_genotype = father[0, pos].split("/")
+    child_genotype = child[0, pos].split("/")
+
     hits = []
  
     if pattern == "recessive":
         for pos in mother_pos:
-            mother_genotype = mother[0, pos].split("/")
-            father_genotype = father[0, pos].split("/")
-            child_genotype = child[0, pos].split("/")
-
             # homozygous in child, heterozygous in both parents
             if len(set(child_genotype)) == 1 and \
                len(set(mother_genotype)) == 2 and \
                len(set(father_genotype)) == 2:
-                hits.append((chrom, pos + start)) #, child[0, pos], mother[0, pos], father[0, pos]))
+                hits.append((chrom, pos + start))
 
     if pattern == "denovo_dominant":
         for pos in mother_pos:
-            mother_genotype = mother[0, pos].split("/")
-            father_genotype = father[0, pos].split("/")
-            child_genotype = child[0, pos].split("/")
-
-            # homozygous in both parents
-            if len(set(mother_genotype)) == 2 and \
-               len(set(father_genotype)) == 2:
-                # at least one allele in child must not be in either parent
-                if len(set(child_genotype).difference(mother_genotype)) > 0 and \
-                   len(set(child_genotype).difference(father_genotype)) > 0:
-                    hits.append((chrom, pos + start)) #, child[0, pos], mother[0, pos], father[0, pos]))
+            # one or both alleles in child must not be in either parent
+            if (child_genotype[0] not in mother_genotype and \
+                child_genotype[0] not in father_genotype) or \
+               (child_genotype[1] not in mother_genotype and \
+                child_genotype[1] not in father_genotype:
+                hits.append((chrom, pos + start))
 
     return hits
 
