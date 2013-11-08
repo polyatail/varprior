@@ -136,14 +136,16 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
     assert len(set(mother_pos).difference(father_pos)) == 0
     assert len(set(father_pos).difference(child_pos)) == 0
 
-    mother_genotype = mother[0, pos].split("/")
-    father_genotype = father[0, pos].split("/")
-    child_genotype = child[0, pos].split("/")
 
     hits = []
  
     if pattern == "recessive":
         for pos in mother_pos:
+            # split genotypes into list
+            mother_genotype = mother[0, pos].split("/")
+            father_genotype = father[0, pos].split("/")
+            child_genotype = child[0, pos].split("/")
+
             # homozygous in child, heterozygous in both parents
             if len(set(child_genotype)) == 1 and \
                len(set(mother_genotype)) == 2 and \
@@ -152,12 +154,80 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
 
     if pattern == "denovo_dominant":
         for pos in mother_pos:
+            # split genotypes into list
+            mother_genotype = mother[0, pos].split("/")
+            father_genotype = father[0, pos].split("/")
+            child_genotype = child[0, pos].split("/")
+
             # one or both alleles in child must not be in either parent
             if (child_genotype[0] not in mother_genotype and \
                 child_genotype[0] not in father_genotype) or \
                (child_genotype[1] not in mother_genotype and \
                 child_genotype[1] not in father_genotype:
                 hits.append((chrom, pos + start))
+
+    if pattern == "compound_het_denovo":
+"""
+From http://www.plosone.org/article/info%3Adoi%2F10.1371%2Fjournal.pone.0070151
+
+1. A variant has to be in a heterozygous state in all affected individuals.
+2. A variant must not occur in a homozygous state in any of the unaffected individuals.
+3. A variant that is heterozygous in an affected child must be heterozygous in exactly one of the parents.
+This rule is a compact version of:
+
+3a. The variant must not be heterozygous in both parents.
+3b. The variant must be present in at least one of the parents.
+4. A gene must have two or more heterozygous variants in each of the affected individuals.
+5. There must be at least one variant transmitted from the paternal side and one transmitted from the maternal side.
+"""
+        # test all combinations of positions in the given region
+        for pos1, pos2 in itertools.combinations(mother_pos, 2):
+            # split genotypes into list
+            mother_genotype1 = mother[0, pos1].split("/")
+            father_genotype1 = father[0, pos1].split("/")
+            child_genotype1 = child[0, pos1].split("/")
+
+            mother_genotype2 = mother[0, pos2].split("/")
+            father_genotype2 = father[0, pos2].split("/")
+            child_genotype2 = child[0, pos2].split("/")
+
+            # 1. child heterozygous at both loci
+            if child_genotype1[0] == child_genotype1[1] or \
+               child_genotype2[0] == child_genotype2[1]:
+                continue
+
+            # there are four hypotheses. each position has two alleles,
+            # and any combination of the two alleles at each position
+            # could be causative
+            for genotype1, genotype2 in itertools.product(child_genotype1, child_genotype2):
+                # 2. parents can't be homozygous for either of these variants
+                if (mother_genotype1[0] == genotype1 and \
+                    mother_genotype1[1] == genotype1) or \
+                   (father_genotype1[0] == genotype1 and \
+                    father_genotype1[1] == genotype1):
+                    continue
+
+                if (mother_genotype2[0] == genotype2 and \
+                    mother_genotype2[1] == genotype2) or \
+                   (father_genotype2[0] == genotype2 and \
+                    father_genotype2[1] == genotype2):
+                    continue
+
+                # 3. causative variant must be heterozygous in one or neither parent
+                if (genotype1 in mother_genotype1 and \
+                    genotype1 in father_genotype1) or 
+                   (genotype2 in mother_genotype2 and \
+                    genotype2 in father_genotype2):
+                    continue
+
+                # 5. both variants can't come from the same parent
+                if (genotype1 in mother_genotype1 and \
+                    genotype2 in mother_genotype2) or \
+                   (genotype1 in father_genotype1 and \
+                    genotype2 in father_genotype2):
+                    continue
+
+                hits.append((chrom, pos1 + start, pos2 + start))
 
     return hits
 
