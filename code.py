@@ -1,3 +1,5 @@
+import os
+import sqlite3
 import numpy
 import scipy
 from scipy.sparse import dok_matrix
@@ -163,23 +165,24 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
             if (child_genotype[0] not in mother_genotype and \
                 child_genotype[0] not in father_genotype) or \
                (child_genotype[1] not in mother_genotype and \
-                child_genotype[1] not in father_genotype:
+                child_genotype[1] not in father_genotype):
                 hits.append((chrom, pos + start))
 
     if pattern == "compound_het_denovo":
-"""
-From http://www.plosone.org/article/info%3Adoi%2F10.1371%2Fjournal.pone.0070151
+        """
+        From http://www.plosone.org/article/info%3Adoi%2F10.1371%2Fjournal.pone.0070151
+        
+        1. A variant has to be in a heterozygous state in all affected individuals.
+        2. A variant must not occur in a homozygous state in any of the unaffected individuals.
+        3. A variant that is heterozygous in an affected child must be heterozygous in exactly one of the parents.
+        This rule is a compact version of:
+        
+        3a. The variant must not be heterozygous in both parents.
+        3b. The variant must be present in at least one of the parents.
+        4. A gene must have two or more heterozygous variants in each of the affected individuals.
+        5. There must be at least one variant transmitted from the paternal side and one transmitted from the maternal side.
+        """
 
-1. A variant has to be in a heterozygous state in all affected individuals.
-2. A variant must not occur in a homozygous state in any of the unaffected individuals.
-3. A variant that is heterozygous in an affected child must be heterozygous in exactly one of the parents.
-This rule is a compact version of:
-
-3a. The variant must not be heterozygous in both parents.
-3b. The variant must be present in at least one of the parents.
-4. A gene must have two or more heterozygous variants in each of the affected individuals.
-5. There must be at least one variant transmitted from the paternal side and one transmitted from the maternal side.
-"""
         # test all combinations of positions in the given region
         for pos1, pos2 in itertools.combinations(mother_pos, 2):
             # split genotypes into list
@@ -215,7 +218,7 @@ This rule is a compact version of:
 
                 # 3. causative variant must be heterozygous in one or neither parent
                 if (genotype1 in mother_genotype1 and \
-                    genotype1 in father_genotype1) or 
+                    genotype1 in father_genotype1) or \
                    (genotype2 in mother_genotype2 and \
                     genotype2 in father_genotype2):
                     continue
@@ -234,6 +237,25 @@ This rule is a compact version of:
 # newell-ikeda poisson distributed scan statistic
 def newell_ikeda(k, pois_lambda, T, w):
     return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / scipy.misc.factorial(k - 1, exact=True))
+
+# load ensGene table into an SQLite database
+def load_ensgene(ensgene_file, ensgene_db):
+    conn = sqlite3.connect(ensgene_db)
+    c = conn.cursor()
+
+    c.execute("CREATE TABLE ensGene (bin int, name text, chrom text, strand text, txStart int, \
+                                     txEnd int, cdsStart int, cdsEnd int, exonCount int, \
+                                     exonStarts text, exonEnds text, score int, name2 text, \
+                                     cdsStartStat text, cdsEndStat text, exonFrames text)")
+
+    for line_num, line in enumerate([x.strip().split() for x in open(ensgene_file)]):
+        if line_num == 0:
+            ensgene_keys = line
+        else:
+            c.execute("INSERT INTO ensGene VALUES (%s)" % ", ".join(["\"%s\"" % x for x in line]))
+
+    conn.commit()
+    conn.close()
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
