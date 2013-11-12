@@ -233,6 +233,81 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
 
     return hits
 
+# given gene name and set of SNPs, does protein product potentially
+# yield a different protein product from that expected?
+def non_synonymous(gene_name, snp_list, ensgene, hg19):
+    # snp_list = ((pos, mut), (pos, mut), ...)
+
+    # gene_name -> ensp -> enst
+
+
+    # examine each transcript isoform of this gene
+    for enst in all_enst:
+        # fetch exons
+        chrom = ensgene.execute("SELECT chrom FROM ensGene WHERE name = '%s'" % enst).fetchone()[0]
+        exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in ensgene.execute("SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % enst).fetchone()]
+        cdsStart, cdsEnd = ensgene.execute("SELECT cdsStart, cdsEnd FROM ensGene WHERE name = '%s'" % enst).fetchone()
+
+        # non-coding
+        if cdsStart == cdsEnd:
+            continue
+
+        coding_exons = []
+
+        # reduce coordinates to those that are coding
+        for start, end in zip(exonStarts, exonEnds):
+            # exon occurs before coding start
+            if end < cdsStart:
+                continue
+            # edge case: exon contains coding start AND end
+            elif start <= cdsStart < end and \
+                 start <= cdsEnd < end:
+                coding_exons.append((cdsStart, cdsEnd))
+                break
+            # exon contains coding start
+            elif start <= cdsStart < end:
+                coding_exons.append((cdsStart, end))
+            # exon contains coding end
+            elif start <= cdsEnd < end:
+                coding_exons.append((start, cdsEnd))
+                break
+
+            # everything else should be in the middle of the coding region
+            coding_exons.append((start, end))
+
+        # any of provided snps occur here? if not, return false
+        snps_in_coding = []
+
+        for pos, mut in snp_list:
+            for start, end in coding_exons:
+                if start <= pos <= end:
+                    snps_in_coding.append((pos, mut))
+                    break
+
+        if len(snps_in_coding) == 0:
+            return False
+
+        # pull nucleotide sequence of regions
+        coding_exon_text = []
+
+        for start, end in coding_exons:
+            coding_exon_text.append(hg19[chrom][start:end])
+
+        # splice and translate to generate baseline
+		base_protein = str(Seq("".join(coding_exon_text)).translate(table=1))
+
+        # all possible combinations of snps in list
+        all_snp_combinations = [snps_in_coding]
+
+        for k in range(1, len(snps_in_coding)):
+            all_snp_combinations.extend(itertools.combinations(snps_in_coding, k))
+
+        for snps in all_snp_combinations:
+
+            # make given mutations in regions
+            # splice and translate
+            # if different from baseline, return true
+
 # newell-ikeda poisson distributed scan statistic
 def newell_ikeda(k, pois_lambda, T, w):
     return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / scipy.misc.factorial(k - 1, exact=True))
