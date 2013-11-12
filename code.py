@@ -16,13 +16,13 @@ ENSEMBL_TO_GENE_NAME = "20130918_ensemblToGeneName.tab"
 STRING_NETWORK_LINKS = "human-protein.links.v9.05.txt"
 STRING_NETWORK_ALIAS = "human-protein.aliases.v9.05.txt"
 
-GENOTYPE_VCF_URL = "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20100804/supporting/AFR.2of4intersection_allele_freq.20100804.genotypes.vcf.gz"
+GENOTYPE_VCF = "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20100804/supporting/AFR.2of4intersection_allele_freq.20100804.genotypes.vcf.gz"
 
 # retrieve allele frequencies of SNPs in given region from 1000 genomes
 def fetch_af_in_region(chrom, start, end):
     tabix_out = tempfile.NamedTemporaryFile(delete=False)
 
-    tabix = subprocess.Popen(["tabix", "-f", "-h", GENOTYPE_VCF_URL,
+    tabix = subprocess.Popen(["tabix", "-f", "-h", GENOTYPE_VCF,
                               "%s:%s-%s" % (chrom, start, end)],
                              stdout=tabix_out)
 
@@ -137,7 +137,6 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
  
     assert len(set(mother_pos).difference(father_pos)) == 0
     assert len(set(father_pos).difference(child_pos)) == 0
-
 
     hits = []
  
