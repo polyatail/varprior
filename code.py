@@ -238,24 +238,54 @@ def mendelian_filter(matrix, pedigree, pattern, chrom, start, end):
 def newell_ikeda(k, pois_lambda, T, w):
     return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / scipy.misc.factorial(k - 1, exact=True))
 
-# load ensGene table into an SQLite database
+# load ensGene table into an SQLite database creating
+# if it doesn't already exist, return cursor
 def load_ensgene(ensgene_file, ensgene_db):
-    conn = sqlite3.connect(ensgene_db)
-    c = conn.cursor()
+    if os.path.isfile(ensgene_db):
+        conn = sqlite3.connect(ensgene_db)
+        c = conn.cursor()
 
-    c.execute("CREATE TABLE ensGene (bin int, name text, chrom text, strand text, txStart int, \
-                                     txEnd int, cdsStart int, cdsEnd int, exonCount int, \
-                                     exonStarts text, exonEnds text, score int, name2 text, \
-                                     cdsStartStat text, cdsEndStat text, exonFrames text)")
+        try:
+            idx_version = c.execute("SELECT value FROM metadata WHERE key = 'version'").fetchone()[0]
 
-    for line_num, line in enumerate([x.strip().split() for x in open(ensgene_file)]):
-        if line_num == 0:
-            ensgene_keys = line
-        else:
-            c.execute("INSERT INTO ensGene VALUES (%s)" % ", ".join(["\"%s\"" % x for x in line]))
+            if idx_version != "varprior_ensgene-1.0":
+                raise ValueError("ensGene version (%s) incompatible with this version of Varprior" % idx_version)
 
-    conn.commit()
-    conn.close()
+            record_count = int(c.execute("SELECT value FROM metadata WHERE key = 'records'").fetchone()[0])
+
+            if record_count == "-1":
+                raise ValueError("Unfinished/partial database provided")
+
+            records_found = int(c.execute("SELECT COUNT(*) FROM ensGene").fetchone()[0])
+
+            if record_count <> records_found:
+                raise ValueError("Corrupt index. Expected %s records, found %s" % (record_count, records_found))
+        except (OperationalError, DatabaseError), error:
+            raise ValueError("Problem with SQLite database: %s" % error)
+    else:
+        conn = sqlite3.connect(ensgene_db)
+        c = conn.cursor()
+
+        c.execute("CREATE TABLE metadata (key text, value text)")
+        c.execute("CREATE TABLE ensGene (bin int, name text, chrom text, strand text, txStart int, \
+                                         txEnd int, cdsStart int, cdsEnd int, exonCount int, \
+                                         exonStarts text, exonEnds text, score int, name2 text, \
+                                         cdsStartStat text, cdsEndStat text, exonFrames text)")
+
+        c.execute("INSERT INTO metadata VALUES ('version', 'varprior_ensgene-1.0')")
+        c.execute("INSERT INTO metadata VALUES ('records', '-1')")
+    
+        for line_num, line in enumerate([x.strip().split() for x in open(ensgene_file)]):
+            if line_num == 0:
+                ensgene_keys = line
+            else:
+                c.execute("INSERT INTO ensGene VALUES (%s)" % ", ".join(["'%s'" % x for x in line]))
+
+        c.execute("UPDATE metadata SET value = '%s' WHERE key = 'records'" % line_num)
+
+        conn.commit()
+
+    return c
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
