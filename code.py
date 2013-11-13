@@ -1,3 +1,4 @@
+from Bio import Seq
 import os
 import sqlite3
 import numpy
@@ -297,25 +298,21 @@ def non_synonymous(gene_name, snp_list, ensgene, hg19):
             return False
 
         # pull nucleotide sequence of regions
-        coding_exon_text = []
+        orig_seq = []
+        mut_seq = []
 
         for start, end in coding_exons:
-            coding_exon_text.append(hg19[chrom][start:end])
+            orig_seq.append(hg19_chrom_orig[start:end])
+            mut_seq.append(hg19_chrom_mut[start:end])
 
-        # splice and translate to generate baseline
-		base_protein = str(Seq("".join(coding_exon_text)).translate(table=1))
+        # translate original and mutated proteins
+        orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
+        mut_protein = str(Seq("".join(mut_seq)).translate(table=1))
 
-        # all possible combinations of snps in list
-        all_snp_combinations = [snps_in_coding]
-
-        for k in range(1, len(snps_in_coding)):
-            all_snp_combinations.extend(itertools.combinations(snps_in_coding, k))
-
-        for snps in all_snp_combinations:
-
-            # make given mutations in regions
-            # splice and translate
-            # if different from baseline, return true
+        if orig_protein != mut_protein:
+            print enst
+            for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein)):
+                print "\t", orig, pos, mut
 
 # newell-ikeda poisson distributed scan statistic
 def newell_ikeda(k, pois_lambda, T, w):
