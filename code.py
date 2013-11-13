@@ -2,7 +2,6 @@ import os
 import sqlite3
 import numpy
 import scipy
-from scipy.sparse import dok_matrix
 import time
 import itertools
 import sys
@@ -81,11 +80,15 @@ def find_connected_genes(node_list, max_depth, graph):
     return set(connected_nodes)
 
 # load specified cols from VCF into sparse matrix
-def load_snps_to_matrix(vcf_in, cols):
+def load_snps_to_matrix(vcf_in, cols, pyf_genome):
     matrix = {}
 
     for index in range(len(cols)):
-        matrix[index] = dok_matrix((25, 250000000), dtype="string")
+        matrix[index] = {}
+
+        for chrom in pyf_genome.keys():
+            matrix[index][chrom] = blist([0])
+            matrix[index][chrom] *= len(pyf_genome[chrom])
 
     for line in open(vcf_in):
         if line.startswith("#"):
@@ -96,13 +99,7 @@ def load_snps_to_matrix(vcf_in, cols):
             continue
 
         line_split = line.strip().split()
-
-        if line_split[0] == "X":
-            chrom = 23
-        elif line_split[0] == "Y":
-            chrom = 24
-        else:
-            chrom = int(line_split[0]) 
+        chrom = "chr%s" % line_split[0]
 
         for matrix_index, col_num in enumerate(kept_cols):
             pos = int(line_split[1])
@@ -114,7 +111,7 @@ def load_snps_to_matrix(vcf_in, cols):
             sample = line_split[col_num][:3]
             sample_coded = reduce(lambda x, y: x.replace(y, code[y]), code, sample)
 
-            matrix[matrix_index][chrom, pos] = sample_coded
+            matrix[matrix_index][chrom][pos] = sample_coded
 
     return matrix
 
@@ -243,8 +240,20 @@ def non_synonymous(gene_name, snp_list, ensgene, hg19):
 
     # examine each transcript isoform of this gene
     for enst in all_enst:
+        # figure out which chromosome gene is on (only do this once)
+        try:
+            chrom
+        except ValueError:
+            chrom = ensgene.execute("SELECT chrom FROM ensGene WHERE name = '%s'" % enst).fetchone()[0]
+
+            hg19_chrom_orig = hg19[chrom][:]
+            hg19_chrom_mut = hg19[chrom][:]
+
+            # make given mutations
+            for mut, pos in snp_list:
+                hg19_chrom_mut[pos] = mut
+
         # fetch exons
-        chrom = ensgene.execute("SELECT chrom FROM ensGene WHERE name = '%s'" % enst).fetchone()[0]
         exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in ensgene.execute("SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % enst).fetchone()]
         cdsStart, cdsEnd = ensgene.execute("SELECT cdsStart, cdsEnd FROM ensGene WHERE name = '%s'" % enst).fetchone()
 
