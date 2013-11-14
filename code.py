@@ -169,47 +169,48 @@ class AnalyzeTrio():
         pattern in ("recessive", "compound_het", "compound_het_denovo", "denovo_dominant")
         """
 
-
         pos_in_region = []
 
         for pos in self.variant_matrix[chrom].keys():
             if start <= pos <= end:
                 pos_in_region.append(pos)
 
+        hits = []
+
         for pos in itertools.combinations(pos_in_region, k):
+            mother, father, child = {}, {}, {}
+
             for i in range(k):
                 mother[i], father[i], child[i] = [self.variant_matrix[chrom][pos[i]][self.pedigree[x]] for x in ("mother", "father", "child")]
 
-        hits = []
+                # if no variant reported, continue
+                if mother[i] == "./." or \
+                   father[i] == "./." or \
+                   child[i] == "./.":
+                    break
 
-            # if no variant reported, continue
-            if mother == "./." or \
-               father == "./." or \
-               child == "./.":
-                continue
-
-            mother, father, child = [x.split("/") for x in (mother, father, child)]
-
-            if m_filter(mother, father, child):
-                hits.append((chrom, pos + start))
+                mother[i], father[i], child[i] = [x.split("/") for x in (mother[i], father[i], child[i])]
+            else:
+                if m_filter(mother, father, child):
+                    hits.append(tuple([chrom] + [start + x for x in pos]))
 
         return hits
 
     @staticmethod
     def _mf_recessive(mother, father, child):
         # homozygous in child, heterozygous in both parents
-        if len(set(child)) == 1 and \
-           len(set(mother)) == 2 and \
-           len(set(father)) == 2:
+        if len(set(child[0])) == 1 and \
+           len(set(mother[0])) == 2 and \
+           len(set(father[0])) == 2:
             return True
 
     @staticmethod
     def _mf_denovo_dominant(mother, father, child):
         # one or both alleles in child must not be in either parent
-        if (child[0] not in mother and \
-            child[0] not in father) or \
-           (child[1] not in mother and \
-            child[1] not in father):
+        if (child[0][0] not in mother[0] and \
+            child[0][0] not in father[0]) or \
+           (child[0][1] not in mother[0] and \
+            child[0][1] not in father[0]):
             return True
 
     @staticmethod
