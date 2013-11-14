@@ -1,3 +1,5 @@
+from blist import blist
+import pyfasta
 from Bio import Seq
 import os
 import sqlite3
@@ -27,11 +29,12 @@ class AnalyzeTrio():
         self.varprior_db = varprior_db
         self.genome_fasta = genome_fasta
 
-        self.variant_matrix = {}
-
+        sys.stderr.write("loading genome\n")
         self.pyf_genome = self.load_genome()
+        sys.stderr.write("loading annotation\n")
         self.c = self.load_annotation(ensgene_file, enst_to_gene_name_file, string_alias_file)
-        self.load_trio_vcf()
+        sys.stderr.write("loading vcf\n")
+        self.variant_matrix = self.load_trio_vcf()
 
     ##
     ## FILE/DATABASE LOADING METHODS
@@ -44,23 +47,23 @@ class AnalyzeTrio():
         # load ensGene table into an SQLite database creating
         # if it doesn't already exist, return cursor
 
-        if os.path.isfile(ensgene_db):
-            conn = sqlite3.connect(ensgene_db)
+        if os.path.isfile(self.varprior_db):
+            conn = sqlite3.connect(self.varprior_db)
             c = conn.cursor()
     
             try:
                 idx_version = c.execute("SELECT value FROM metadata WHERE key = 'version'").fetchone()[0]
-    
+
                 if idx_version != "varprior-1.0":
                     raise ValueError("ensGene version (%s) incompatible with this version of Varprior" % idx_version)
-    
+
                 record_count = int(c.execute("SELECT value FROM metadata WHERE key = 'records'").fetchone()[0])
-    
+
                 if record_count == "-1":
                     raise ValueError("Unfinished/partial database provided")
-    
+
                 records_found = int(c.execute("SELECT COUNT(*) FROM ensGene").fetchone()[0])
-    
+
                 if record_count <> records_found:
                     raise ValueError("Corrupt index. Expected %s records, found %s" % (record_count, records_found))
             except (OperationalError, DatabaseError), error:
@@ -71,9 +74,9 @@ class AnalyzeTrio():
                string_alias_file == None:
                 raise ValueError("Cannot create database without input files")
 
-            conn = sqlite3.connect(ensgene_db)
+            conn = sqlite3.connect(self.varprior_db)
             c = conn.cursor()
-    
+
             c.execute("CREATE TABLE metadata (key text, value text)")
             c.execute("CREATE TABLE ensGene (bin int, name text, chrom text, strand text, txStart int, \
                                              txEnd int, cdsStart int, cdsEnd int, exonCount int, \
@@ -100,11 +103,11 @@ class AnalyzeTrio():
                     ensgene_keys = line
                 else:
                     c.execute("INSERT INTO ensGene VALUES (%s)" % ", ".join(["'%s'" % x for x in line]))
-    
+
             c.execute("UPDATE metadata SET value = '%s' WHERE key = 'records'" % line_num)
-    
+
             conn.commit()
-    
+
         return c
 
     def load_trio_vcf(self):
@@ -116,13 +119,11 @@ class AnalyzeTrio():
                 sample, containing variants reported in the VCF file
         """
 
-        # generate empty sparse arrays for each sample    
-        for sample in self.sample_names:
-            self.variant_matrix[i] = {}
-    
-            for chrom in self.pyf_genome.keys():
-                matrix[sample][chrom] = blist([0])
-                matrix[sample][chrom] *= len(self.pyf_genome[chrom])
+        # generate empty matrix
+        matrix = {}
+
+        for chrom in self.pyf_genome.keys():
+            matrix[chrom] = {}
 
         for line in open(self.vcf_file, "r"):
             # parse the header, find columns of interest
@@ -136,10 +137,12 @@ class AnalyzeTrio():
                         raise ValueError("Specified sample (%s) not in VCF (%s)" % (error.split()[0], self.vcf_file))
  
                 continue
-    
+
             line_split = line.strip().split()
             chrom = "chr%s" % line_split[0]
-    
+
+            sample_to_snp = {}
+
             for sample, column in kept_cols: 
                 pos = int(line_split[1])
                 ref = line_split[3]
@@ -149,37 +152,51 @@ class AnalyzeTrio():
     
                 genotype = line_split[column][:3]
                 genotype_coded = reduce(lambda x, y: x.replace(y, code[y]), code, genotype)
-    
-                self.variant_matrix[sample][chrom][pos] = genotype_coded
+   
+                sample_to_snp[sample] = genotype_coded
+
+            matrix[chrom][pos] = sample_to_snp
+
+        return matrix
 
     ##
     ## INHERITANCE FILTER METHODS
     ##
 
-    def mendelian_filter(self, m_filter, chrom, start, end):
+    def mendelian_filter(self, m_filter, chrom, start, end, k = 1):
         """
         matrix[0,1,2] = sparsearray(0:24, 0:N, dtype="string")
         pattern in ("recessive", "compound_het", "compound_het_denovo", "denovo_dominant")
         """
 
+
+        pos_in_region = []
+
+        for pos in self.variant_matrix[chrom].keys():
+            if start <= pos <= end:
+                pos_in_region.append(pos)
+
+        for pos in itertools.combinations(pos_in_region, k):
+            for i in range(k):
+                mother[i], father[i], child[i] = [self.variant_matrix[chrom][pos[i]][self.pedigree[x]] for x in ("mother", "father", "child")]
+
         hits = []
 
-        for pos in range(start, end):
-            mother, father, child = [self.variant_matrix[self.pedigree[x]][chrom][pos] for x in ("mother", "father", "child")]
-
             # if no variant reported, continue
-            if mother == 0 or \
-               father == 0 or \
-               child == 0:
+            if mother == "./." or \
+               father == "./." or \
+               child == "./.":
                 continue
 
-            mother, father, child = [x.split("/") for x in ("mother", "father", "child")]
+            mother, father, child = [x.split("/") for x in (mother, father, child)]
 
             if m_filter(mother, father, child):
                 hits.append((chrom, pos + start))
 
+        return hits
+
     @staticmethod
-    def _mf_recessive(mother, father, child) 
+    def _mf_recessive(mother, father, child):
         # homozygous in child, heterozygous in both parents
         if len(set(child)) == 1 and \
            len(set(mother)) == 2 and \
@@ -456,9 +473,9 @@ class AnalyzeTrio():
         # newell-ikeda poisson distributed scan statistic
         return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / scipy.misc.factorial(k - 1, exact=True))
 
-if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print "usage: %s score_cutoff_float gene_name1 [gene_name2 gene_name3]" % sys.argv[0]
-        sys.exit(1)
-
-    import pdb; pdb.set_trace()
+a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
+                {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
+                "exomes_49.vcf",
+                "varprior.db",
+                "hg19.fa",
+                "20130918_ensGene.tab", "20130918_ensemblToGeneName.tab", "human-protein.aliases.v9.05.txt")
