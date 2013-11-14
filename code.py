@@ -1,6 +1,7 @@
+import copy
 from blist import blist
 import pyfasta
-from Bio import Seq
+from Bio.Seq import Seq
 import os
 import sqlite3
 import numpy
@@ -153,7 +154,7 @@ class AnalyzeTrio():
                 genotype = line_split[column][:3]
                 genotype_coded = reduce(lambda x, y: x.replace(y, code[y]), code, genotype)
    
-                sample_to_snp[sample] = genotype_coded
+                sample_to_snp[sample] = genotype_coded.split("/")
 
             matrix[chrom][pos] = sample_to_snp
 
@@ -184,12 +185,10 @@ class AnalyzeTrio():
                 mother[i], father[i], child[i] = [self.variant_matrix[chrom][pos[i]][self.pedigree[x]] for x in ("mother", "father", "child")]
 
                 # if no variant reported, continue
-                if mother[i] == "./." or \
-                   father[i] == "./." or \
-                   child[i] == "./.":
+                if "." in mother[i] or \
+                   "." in father[i] or \
+                   "." in child[i]:
                     break
-
-                mother[i], father[i], child[i] = [x.split("/") for x in (mother[i], father[i], child[i])]
             else:
                 if m_filter(mother, father, child):
                     hits.append(tuple([chrom] + [start + x for x in pos]))
@@ -214,7 +213,7 @@ class AnalyzeTrio():
             return True
 
     @staticmethod
-    def _mf_compound_het_denovo(mother1, father1, child1, mother2, father2, child2):
+    def _mf_compound_het_denovo(mother, father, child):
         """
         From http://www.plosone.org/article/info%3Adoi%2F10.1371%2Fjournal.pone.0070151
         
@@ -229,40 +228,43 @@ class AnalyzeTrio():
         5. There must be at least one variant transmitted from the paternal side and one transmitted from the maternal side.
         """
 
+        mother1, father1, child1 = mother[0], father[0], child[0]
+        mother2, father2, child2 = mother[1], father[1], child[1]
+
         # 1. child heterozygous at both loci
-        if child1[0] == child1[1] or \
-           child2[0] == child2[1]:
+        if child[0][0] == child[0][1] or \
+           child[1][0] == child[1][1]:
             return False
     
         # there are four hypotheses. each position has two alleles,
         # and any combination of the two alleles at each position
         # could be causative
-        for child1_a, child2_a in itertools.product(child1, child2):
+        for child1, child2 in itertools.product(child[0], child[1]):
             # 2. parents can't be homozygous for either of these variants
-            if (mother1[0] == child1_a and \
-                mother1[1] == child1_a) or \
-               (father1[0] == child1_a and \
-                father1[1] == child1_a):
+            if (mother[0][0] == child1 and \
+                mother[0][1] == child1) or \
+               (father[0][0] == child1 and \
+                father[0][1] == child1):
                 continue
     
-            if (mother2[0] == child2_a and \
-                mother2[1] == child2_a) or \
-               (father2[0] == child2_a and \
-                father2[1] == child2_a):
+            if (mother[1][0] == child2 and \
+                mother[1][1] == child2) or \
+               (father[1][0] == child2 and \
+                father[1][1] == child2):
                 continue
     
             # 3. causative variant must be heterozygous in one or neither parent
-            if (child1_a in mother1 and \
-                child1_a in father1) or \
-               (child2_a in mother2 and \
-                child2_a in father2):
+            if (child1 in mother[0] and \
+                child1 in father[0]) or \
+               (child2 in mother[1] and \
+                child2 in father[1]):
                 continue
     
             # 5. both variants can't come from the same parent
-            if (child1_a in mother1 and \
-                child2_a in mother2) or \
-               (child1_a in father1 and \
-                child2_a in father2):
+            if (child1 in mother[0] and \
+                child2 in mother[1]) or \
+               (child1 in father[0] and \
+                child2 in father[1]):
                 continue
 
             return True
@@ -271,32 +273,22 @@ class AnalyzeTrio():
     ## GENOME/CODING POTENTIAL METHODS
     ##
 
-    def non_synonymous(self, gene_name, snp_list):
+    def non_synonymous(self, gene_name, sample):
         # given gene name and set of SNPs, does protein product potentially
         # yield a different protein product from that expected?
         # snp_list = ((pos, mut), (pos, mut), ...)
-    
+   
         # gene_name -> enst
         all_enst = self.c.execute("SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene_name).fetchall()
 
         if len(all_enst) == 0:
             raise ValueError("Gene (%s) not found in database" % gene_name)
-    
+   
+        # figure out which chromosome gene is on (only do this once)
+        chrom, gene_start, gene_end = self.c.execute("SELECT MAX(chrom), MIN(txStart), MAX(txEnd) FROM ensGene WHERE name IN (%s)" % ", ".join(["'%s'" % x for x in all_enst])).fetchone()
+ 
         # examine each transcript isoform of this gene
         for enst in all_enst:
-            # figure out which chromosome gene is on (only do this once)
-            try:
-                chrom
-            except ValueError:
-                chrom = self.c.execute("SELECT chrom FROM ensGene WHERE name = '%s'" % enst).fetchone()[0]
-    
-                chrom_orig = self.pyf_genome[chrom][:]
-                chrom_mut = self.pyf_genome[chrom][:]
-    
-                # make given mutations
-                for mut, pos in snp_list:
-                    chrom_mut[pos] = mut
-    
             # fetch exons
             exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in self.c.execute("SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % enst).fetchone()]
             cdsStart, cdsEnd = self.c.execute("SELECT cdsStart, cdsEnd FROM ensGene WHERE name = '%s'" % enst).fetchone()
@@ -328,34 +320,40 @@ class AnalyzeTrio():
                 # everything else should be in the middle of the coding region
                 coding_exons.append((start, end))
     
-            # any of provided snps occur here? if not, return false
-            snps_in_coding = []
-    
-            for pos, mut in snp_list:
-                for start, end in coding_exons:
-                    if start <= pos <= end:
-                        snps_in_coding.append((pos, mut))
-                        break
-    
-            if len(snps_in_coding) == 0:
-                return False
-    
             # pull nucleotide sequence of regions
             orig_seq = []
-            mut_seq = []
-    
+
             for start, end in coding_exons:
-                orig_seq.append(chrom_orig[start:end])
-                mut_seq.append(chrom_mut[start:end])
+                orig_seq.append(self.pyf_genome[chrom][start:end])
+
+            mut_seq1, mut_seq2 = [], []
+    
+            # make given mutations
+            for genotype_index, seq_list in ((0, mut_seq1), (1, mut_seq2)):
+                for pos in self.variant_matrix[chrom]:
+                    if gene_start <= pos <= gene_end:
+                        genotype = self.variant_matrix[chrom][pos][sample]
+                        self.pyf_genome[chrom][pos] = genotype[genotype_index]
+ 
+                for start, end in coding_exons:
+                    seq_list.append(self.pyf_genome[chrom].__getitem__(slice(start, end), True))
     
             # translate original and mutated proteins
             orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
-            mut_protein = str(Seq("".join(mut_seq)).translate(table=1))
+            mut_protein1 = str(Seq("".join(mut_seq1)).translate(table=1))
+            mut_protein2 = str(Seq("".join(mut_seq2)).translate(table=1))
     
-            if orig_protein != mut_protein:
-                print enst
-                for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein)):
-                    print "\t", orig, pos, mut
+            if orig_protein != mut_protein1:
+                print enst, "allele 1"
+                for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein1)):
+                    if orig != mut:
+                        print "\t", orig, pos, mut
+
+            if orig_protein != mut_protein2:
+                print enst, "allele 2"
+                for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein2)):
+                    if orig != mut:
+                        print "\t", orig, pos, mut
 
     ##
     ## VCF ALLELE FREQUENCY METHODS
@@ -480,3 +478,5 @@ a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 "varprior.db",
                 "hg19.fa",
                 "20130918_ensGene.tab", "20130918_ensemblToGeneName.tab", "human-protein.aliases.v9.05.txt")
+
+a.non_synonymous("IL23R", "jp-scid7a")
