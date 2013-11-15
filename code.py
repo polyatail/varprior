@@ -22,20 +22,20 @@ STRING_NETWORK_ALIAS = "human-protein.aliases.v9.05.txt"
 GENOTYPE_VCF = "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20100804/supporting/AFR.2of4intersection_allele_freq.20100804.genotypes.vcf.gz"
 
 class AnalyzeTrio():
-    def __init__(self, sample_names, pedigree, vcf_file, varprior_db, genome_fasta,
-                 ensgene_file = None, enst_to_gene_name_file = None, string_alias_file = None):
+    def __init__(self, sample_names, pedigree, varprior_db, genome_fasta,
+                 vcf_file = None, ensgene_file = None, enst_to_gene_name_file = None, string_alias_file = None):
         self.sample_names = sample_names
         self.pedigree = pedigree
-        self.vcf_file = vcf_file
+        self.stripped_pedigree = dict([(x, y.replace("-", "")) for x, y in pedigree.items()])
         self.varprior_db = varprior_db
         self.genome_fasta = genome_fasta
 
         sys.stderr.write("loading genome\n")
         self.pyf_genome = self.load_genome()
         sys.stderr.write("loading annotation\n")
-        self.c = self.load_annotation(ensgene_file, enst_to_gene_name_file, string_alias_file)
+        self.conn, self.c = self.load_annotation(ensgene_file, enst_to_gene_name_file, string_alias_file)
         sys.stderr.write("loading vcf\n")
-        self.variant_matrix = self.load_trio_vcf()
+        self.load_trio_vcf(vcf_file)
 
     ##
     ## FILE/DATABASE LOADING METHODS
@@ -50,6 +50,7 @@ class AnalyzeTrio():
 
         if os.path.isfile(self.varprior_db):
             conn = sqlite3.connect(self.varprior_db)
+            conn.row_factory = sqlite3.Row
             c = conn.cursor()
     
             try:
@@ -76,6 +77,7 @@ class AnalyzeTrio():
                 raise ValueError("Cannot create database without input files")
 
             conn = sqlite3.connect(self.varprior_db)
+            conn.row_factory = sqlite3.Row
             c = conn.cursor()
 
             c.execute("CREATE TABLE metadata (key text, value text)")
@@ -88,6 +90,7 @@ class AnalyzeTrio():
 
             c.execute("INSERT INTO metadata VALUES ('version', 'varprior-1.0')")
             c.execute("INSERT INTO metadata VALUES ('records', '-1')")
+            c.execute("INSERT INTO metadata VALUES ('variants', '-1')")
 
             # load ensemblToGeneName (translates ENST -> short names, e.g. IL2RG)
             for line in [x.strip().split() for x in open(enst_to_gene_name_file)]:
@@ -109,9 +112,9 @@ class AnalyzeTrio():
 
             conn.commit()
 
-        return c
+        return conn, c
 
-    def load_trio_vcf(self):
+    def load_trio_vcf(self, vcf_file):
         """
         Loads a given VCF file into a sparse matrix
 
@@ -120,45 +123,66 @@ class AnalyzeTrio():
                 sample, containing variants reported in the VCF file
         """
 
-        # generate empty matrix
-        matrix = {}
+        variant_count = int(self.c.execute("SELECT value FROM metadata WHERE key = 'variants'").fetchone()[0])
 
-        for chrom in self.pyf_genome.keys():
-            matrix[chrom] = {}
+        if variant_count > -1:
+            if vcf_file != None:
+                db_vcf_file = self.c.execute("SELECT value FROM metadata WHERE key = 'vcf_file'").fetchone()[0]
 
-        for line in open(self.vcf_file, "r"):
-            # parse the header, find columns of interest
-            if line.startswith("#"):
-                if line.startswith("#CHROM"):
-                    header = line.strip().split()
+                if vcf_file != db_vcf_file:
+                    raise ValueError("Database variants do not match specified file (%s != %s)" % (db_vcf_file, vcf_file))
 
-                    try:
-                        kept_cols = [(x, header.index(x)) for x in self.sample_names]
-                    except ValueError, error:
-                        raise ValueError("Specified sample (%s) not in VCF (%s)" % (error.split()[0], self.vcf_file))
- 
-                continue
+            variants_found = int(self.c.execute("SELECT COUNT(*) FROM variants").fetchone()[0])
 
-            line_split = line.strip().split()
-            chrom = "chr%s" % line_split[0]
+            if variant_count <> variants_found:
+                raise ValueError("Corrupt index. Expected %s records, found %s" % (variant_count, variants_found))
+        else:
+            if vcf_file == None:
+                raise ValueError("Database empty and no vcf_file specified")
 
-            sample_to_snp = {}
+            self.c.execute("CREATE TABLE variants (chrom text, pos int, %s)" % ", ".join(["%s text" % x.replace("-", "") for x in self.sample_names]))
 
-            for sample, column in kept_cols: 
-                pos = int(line_split[1])
-                ref = line_split[3]
-                alt = [(str(x + 1), y) for x, y in enumerate(line_split[4].split(","))]
+            records = 0
+
+            for line in open(vcf_file, "r"):
+                # parse the header, find columns of interest
+                if line.startswith("#"):
+                    if line.startswith("#CHROM"):
+                        header = line.strip().split()
     
-                code = dict([(str(0), ref)] + alt)
+                        try:
+                            kept_cols = [(x, header.index(x)) for x in self.sample_names]
+                        except ValueError, error:
+                            raise ValueError("Specified sample (%s) not in VCF (%s)" % (error.split()[0], vcf_file))
+     
+                    continue
     
-                genotype = line_split[column][:3]
-                genotype_coded = reduce(lambda x, y: x.replace(y, code[y]), code, genotype)
-   
-                sample_to_snp[sample] = genotype_coded.split("/")
+                line_split = line.strip().split()
+                chrom = "chr%s" % line_split[0]
+    
+                sample_to_snp = {}
+    
+                for sample, column in kept_cols: 
+                    pos = int(line_split[1])
+                    ref = line_split[3]
+                    alt = [(str(x + 1), y) for x, y in enumerate(line_split[4].split(","))]
+        
+                    code = dict([(str(0), ref)] + alt)
+        
+                    genotype = line_split[column][:3]
+                    genotype_coded = reduce(lambda x, y: x.replace(y, code[y]), code, genotype)
 
-            matrix[chrom][pos] = sample_to_snp
+                    sample_to_snp[sample] = genotype_coded
 
-        return matrix
+                self.c.execute("INSERT INTO variants VALUES ('%s', '%s', %s)" % (chrom, pos, ", ".join(["'%s'" % sample_to_snp[x] for x in self.sample_names])))
+                records += 1
+
+            self.c.execute("CREATE INDEX IF NOT EXISTS chrom_index ON variants(chrom);")
+            self.c.execute("CREATE INDEX IF NOT EXISTS pos_index ON variants(pos);")
+
+            self.c.execute("INSERT INTO metadata VALUES ('vcf_file', '%s')" % vcf_file)
+            self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % records)
+            self.conn.commit()
 
     ##
     ## INHERITANCE FILTER METHODS
@@ -170,11 +194,7 @@ class AnalyzeTrio():
         pattern in ("recessive", "compound_het", "compound_het_denovo", "denovo_dominant")
         """
 
-        pos_in_region = []
-
-        for pos in self.variant_matrix[chrom].keys():
-            if start <= pos <= end:
-                pos_in_region.append(pos)
+        pos_in_region = self.c.execute("SELECT * FROM variants WHERE chrom = '%s' AND %s <= pos AND pos <= %s" % (chrom, start, end)).fetchall()
 
         hits = []
 
@@ -182,7 +202,7 @@ class AnalyzeTrio():
             mother, father, child = {}, {}, {}
 
             for i in range(k):
-                mother[i], father[i], child[i] = [self.variant_matrix[chrom][pos[i]][self.pedigree[x]] for x in ("mother", "father", "child")]
+                mother[i], father[i], child[i] = [pos[i][self.stripped_pedigree[x]].split("/") for x in ("mother", "father", "child")]
 
                 # if no variant reported, continue
                 if "." in mother[i] or \
@@ -191,7 +211,7 @@ class AnalyzeTrio():
                     break
             else:
                 if m_filter(mother, father, child):
-                    hits.append(tuple([chrom] + [start + x for x in pos]))
+                    hits.append(tuple([chrom] + [start + x["pos"] for x in pos]))
 
         return hits
 
@@ -277,15 +297,20 @@ class AnalyzeTrio():
         # given gene name and set of SNPs, does protein product potentially
         # yield a different protein product from that expected?
         # snp_list = ((pos, mut), (pos, mut), ...)
+
+        # sample can't have dashes in it
+        stripped_sample = sample.replace("-", "")
    
         # gene_name -> enst
-        all_enst = self.c.execute("SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene_name).fetchall()
+        all_enst = [x[0] for x in self.c.execute("SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene_name).fetchall()]
 
         if len(all_enst) == 0:
             raise ValueError("Gene (%s) not found in database" % gene_name)
    
         # figure out which chromosome gene is on (only do this once)
         chrom, gene_start, gene_end = self.c.execute("SELECT MAX(chrom), MIN(txStart), MAX(txEnd) FROM ensGene WHERE name IN (%s)" % ", ".join(["'%s'" % x for x in all_enst])).fetchone()
+
+        results = {}
  
         # examine each transcript isoform of this gene
         for enst in all_enst:
@@ -330,10 +355,10 @@ class AnalyzeTrio():
     
             # make given mutations
             for genotype_index, seq_list in ((0, mut_seq1), (1, mut_seq2)):
-                for pos in self.variant_matrix[chrom]:
-                    if gene_start <= pos <= gene_end:
-                        genotype = self.variant_matrix[chrom][pos][sample]
-                        self.pyf_genome[chrom][pos] = genotype[genotype_index]
+                pos_in_region = self.c.execute("SELECT * FROM variants WHERE chrom = '%s' AND %s <= pos AND pos <= %s" % (chrom, cdsStart, cdsEnd)).fetchall()
+
+                for row in pos_in_region:
+                    self.pyf_genome[chrom][row["pos"]] = row[stripped_sample].split("/")[genotype_index]
  
                 for start, end in coding_exons:
                     seq_list.append(self.pyf_genome[chrom].__getitem__(slice(start, end), True))
@@ -342,18 +367,25 @@ class AnalyzeTrio():
             orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
             mut_protein1 = str(Seq("".join(mut_seq1)).translate(table=1))
             mut_protein2 = str(Seq("".join(mut_seq2)).translate(table=1))
-    
+
+            allele1 = []
+
             if orig_protein != mut_protein1:
-                print enst, "allele 1"
                 for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein1)):
                     if orig != mut:
-                        print "\t", orig, pos, mut
+                        allele1.append((orig, pos, mut))
+
+            allele2 = []
 
             if orig_protein != mut_protein2:
-                print enst, "allele 2"
                 for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein2)):
                     if orig != mut:
-                        print "\t", orig, pos, mut
+                        allele2.append((orig, pos, mut))
+
+            if allele1 or allele2:
+                results[enst] = (allele1, allele2)
+
+        return results
 
     ##
     ## VCF ALLELE FREQUENCY METHODS
@@ -474,9 +506,11 @@ class AnalyzeTrio():
 
 a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
-                "exomes_49.vcf",
                 "varprior.db",
                 "hg19.fa",
-                "20130918_ensGene.tab", "20130918_ensemblToGeneName.tab", "human-protein.aliases.v9.05.txt")
+                "exomes_49.vcf", "20130918_ensGene.tab", "20130918_ensemblToGeneName.tab", "human-protein.aliases.v9.05.txt")
 
-a.non_synonymous("IL23R", "jp-scid7a")
+print a.non_synonymous("IL23R", "jp-scid7a")
+#print a.mendelian_filter(a._mf_compound_het_denovo, "chr1", 1000000, 2000000, k=2)
+#print a.mendelian_filter(a._mf_recessive, "chr1", 1000000, 2000000)
+#print a.mendelian_filter(a._mf_denovo_dominant, "chr1", 1000000, 2000000)
