@@ -296,6 +296,15 @@ class AnalyzeTrio():
 
             return True
 
+    def mendelian_bg_probs(self):
+        """
+        Determine background distribution of mendelian inheritance patterns
+
+        Single-variant tests are no problem, but what about compound het?
+        """
+
+        pass
+
     ##
     ## GENOME/CODING POTENTIAL METHODS
     ##
@@ -393,6 +402,12 @@ class AnalyzeTrio():
                 results[enst] = (allele1, allele2)
 
         return results
+
+    def nonsym_bg_probs(self):
+        """
+        Look at all transcripts for mutations not in either parent, save in table
+        """
+        pass
 
     ##
     ## VCF ALLELE FREQUENCY METHODS
@@ -502,6 +517,12 @@ class AnalyzeTrio():
         plt.axis("off")
         plt.show()
 
+    def score_gene_placement(self, gene_name):
+        """
+        Return a score for a gene's placement in the network
+        """
+        pass
+
     ##
     ## STATISTICS METHODS
     ##
@@ -510,6 +531,10 @@ class AnalyzeTrio():
     def newell_ikeda(k, pois_lambda, T, w):
         # newell-ikeda poisson distributed scan statistic
         return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / scipy.misc.factorial(k - 1, exact=True))
+
+    def mcda_product(self, values):
+        # return weighted product score, combining scores with self.weights
+        pass
 
 a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
