@@ -24,11 +24,18 @@ GENOTYPE_VCF = "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20100804/suppor
 class AnalyzeTrio():
     def __init__(self, sample_names, pedigree, varprior_db, genome_fasta,
                  vcf_file = None, ensgene_file = None, enst_to_gene_name_file = None, string_alias_file = None):
+        self.weights = {"mendelian": 1,
+                        "non-synonymous": 1,
+                        "network": 1,
+                        "global_af": 1,
+                        "local_af": 1}
+
         self.sample_names = sample_names
-        self.pedigree = pedigree
-        self.stripped_pedigree = dict([(x, y.replace("-", "")) for x, y in pedigree.items()])
         self.varprior_db = varprior_db
         self.genome_fasta = genome_fasta
+
+        self.pedigree = pedigree
+        self.stripped_pedigree = dict([(x, y.replace("-", "")) for x, y in pedigree.items()])
 
         sys.stderr.write("loading genome\n")
         self.pyf_genome = self.load_genome()
