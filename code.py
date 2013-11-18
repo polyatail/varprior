@@ -37,10 +37,15 @@ class AnalyzeTrio():
         self.pedigree = pedigree
         self.stripped_pedigree = dict([(x, y.replace("-", "")) for x, y in pedigree.items()])
 
+        self.stderr.write("loading db")
+        self.conn, self.c = self.load_db()
+
         sys.stderr.write("loading genome\n")
         self.pyf_genome = self.load_genome()
+
         sys.stderr.write("loading annotation\n")
-        self.conn, self.c = self.load_annotation(ensgene_file, enst_to_gene_name_file, string_alias_file)
+        self.load_annotation(ensgene_file, enst_to_gene_name_file, string_alias_file)
+
         sys.stderr.write("loading vcf\n")
         self.load_trio_vcf(vcf_file)
 
@@ -48,13 +53,7 @@ class AnalyzeTrio():
     ## FILE/DATABASE LOADING METHODS
     ##
 
-    def load_genome(self):
-        return pyfasta.Fasta(self.genome_fasta, record_class=pyfasta.records.MutNpyFastaRecord)
-
-    def load_annotation(self, ensgene_file, enst_to_gene_name_file, string_alias_file):
-        # load ensGene table into an SQLite database creating
-        # if it doesn't already exist, return cursor
-
+    def load_db(self):
         if os.path.isfile(self.varprior_db):
             conn = sqlite3.connect(self.varprior_db)
             conn.row_factory = sqlite3.Row
@@ -78,11 +77,6 @@ class AnalyzeTrio():
             except (OperationalError, DatabaseError), error:
                 raise ValueError("Problem with SQLite database: %s" % error)
         else:
-            if ensgene_file == None or \
-               enst_to_gene_name_file == None or \
-               string_alias_file == None:
-                raise ValueError("Cannot create database without input files")
-
             conn = sqlite3.connect(self.varprior_db)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
@@ -99,27 +93,38 @@ class AnalyzeTrio():
             c.execute("INSERT INTO metadata VALUES ('records', '-1')")
             c.execute("INSERT INTO metadata VALUES ('variants', '-1')")
 
-            # load ensemblToGeneName (translates ENST -> short names, e.g. IL2RG)
-            for line in [x.strip().split() for x in open(enst_to_gene_name_file)]:
-                c.execute("INSERT INTO enst_to_gene_name VALUES ('%s', '%s')" % (line[0], line[1]))
-
-            # load string alises (translates ENSP -> ENST/ENSG)
-            for line in [x.strip().split() for x in open(string_alias_file)]:
-                if line[2].startswith("ENST"):
-                    c.execute("INSERT INTO ensp_to_enst VALUES ('%s', '%s')" % (line[1], line[2]))
-
-            # load ensgene
-            for line_num, line in enumerate([x.strip().split() for x in open(ensgene_file)]):
-                if line_num == 0:
-                    ensgene_keys = line
-                else:
-                    c.execute("INSERT INTO ensGene VALUES (%s)" % ", ".join(["'%s'" % x for x in line]))
-
-            c.execute("UPDATE metadata SET value = '%s' WHERE key = 'records'" % line_num)
-
-            conn.commit()
-
         return conn, c
+
+    def load_genome(self):
+        return pyfasta.Fasta(self.genome_fasta, record_class=pyfasta.records.MutNpyFastaRecord)
+
+    def load_annotation(self, ensgene_file, enst_to_gene_name_file, string_alias_file):
+        assert self.conn, self.c
+
+        if ensgene_file == None or \
+           enst_to_gene_name_file == None or \
+           string_alias_file == None:
+            raise ValueError("Cannot create database without input files")
+
+        # load ensemblToGeneName (translates ENST -> short names, e.g. IL2RG)
+        for line in [x.strip().split() for x in open(enst_to_gene_name_file)]:
+            self.c.execute("INSERT INTO enst_to_gene_name VALUES ('%s', '%s')" % (line[0], line[1]))
+
+        # load string aliases (translates ENSP -> ENST/ENSG)
+        for line in [x.strip().split() for x in open(string_alias_file)]:
+            if line[2].startswith("ENST"):
+                self.c.execute("INSERT INTO ensp_to_enst VALUES ('%s', '%s')" % (line[1], line[2]))
+
+        # load ensgene
+        for line_num, line in enumerate([x.strip().split() for x in open(ensgene_file)]):
+            if line_num == 0:
+                ensgene_keys = line
+            else:
+                self.c.execute("INSERT INTO ensGene VALUES (%s)" % ", ".join(["'%s'" % x for x in line]))
+
+        self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'records'" % line_num)
+
+        self.conn.commit()
 
     def load_trio_vcf(self, vcf_file):
         """
@@ -129,6 +134,8 @@ class AnalyzeTrio():
         Output: Sparse arrays (variant_matrix) of every chromosome for every
                 sample, containing variants reported in the VCF file
         """
+
+        assert self.conn, self.c
 
         variant_count = int(self.c.execute("SELECT value FROM metadata WHERE key = 'variants'").fetchone()[0])
 
