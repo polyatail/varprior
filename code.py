@@ -247,8 +247,6 @@ class AnalyzeTrio():
         1. A variant has to be in a heterozygous state in all affected individuals.
         2. A variant must not occur in a homozygous state in any of the unaffected individuals.
         3. A variant that is heterozygous in an affected child must be heterozygous in exactly one of the parents.
-        This rule is a compact version of:
-        
         3a. The variant must not be heterozygous in both parents.
         3b. The variant must be present in at least one of the parents.
         4. A gene must have two or more heterozygous variants in each of the affected individuals.
@@ -309,99 +307,88 @@ class AnalyzeTrio():
     ## GENOME/CODING POTENTIAL METHODS
     ##
 
-    def non_synonymous(self, gene_name, sample):
+    def non_synonymous_gene(self, gene_name, sample):
         # given gene name and set of SNPs, does protein product potentially
         # yield a different protein product from that expected?
         # snp_list = ((pos, mut), (pos, mut), ...)
 
-        # sample can't have dashes in it
-        stripped_sample = sample.replace("-", "")
-   
         # gene_name -> enst
         all_enst = [x[0] for x in self.c.execute("SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene_name).fetchall()]
 
         if len(all_enst) == 0:
             raise ValueError("Gene (%s) not found in database" % gene_name)
-   
-        # figure out which chromosome gene is on (only do this once)
-        chrom, gene_start, gene_end = self.c.execute("SELECT MAX(chrom), MIN(txStart), MAX(txEnd) FROM ensGene WHERE name IN (%s)" % ", ".join(["'%s'" % x for x in all_enst])).fetchone()
 
         results = {}
  
         # examine each transcript isoform of this gene
         for enst in all_enst:
-            # fetch exons
-            exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in self.c.execute("SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % enst).fetchone()]
-            cdsStart, cdsEnd = self.c.execute("SELECT cdsStart, cdsEnd FROM ensGene WHERE name = '%s'" % enst).fetchone()
-    
-            # non-coding
-            if cdsStart == cdsEnd:
+            results[enst] = self.non_synonymous_enst(enst, sample)
+
+    def non_synonymous_enst(self, enst, sample):
+        # sample can't have dashes in it
+        stripped_sample = sample.replace("-", "")
+   
+        # fetch exons
+        chrom = self.c.execute("SELECT chrom FROM ensGene WHERE name = '%s'" % enst).fetchone()[0]
+        exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in self.c.execute("SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % enst).fetchone()]
+        cdsStart, cdsEnd = self.c.execute("SELECT cdsStart, cdsEnd FROM ensGene WHERE name = '%s'" % enst).fetchone()
+
+        # non-coding
+        if cdsStart == cdsEnd:
+            continue
+
+        coding_exons = []
+
+        # reduce coordinates to those that are coding
+        for start, end in zip(exonStarts, exonEnds):
+            # exon occurs before coding start
+            if end < cdsStart:
                 continue
-    
-            coding_exons = []
-    
-            # reduce coordinates to those that are coding
-            for start, end in zip(exonStarts, exonEnds):
-                # exon occurs before coding start
-                if end < cdsStart:
-                    continue
-                # edge case: exon contains coding start AND end
-                elif start <= cdsStart < end and \
-                     start <= cdsEnd < end:
-                    coding_exons.append((cdsStart, cdsEnd))
-                    break
-                # exon contains coding start
-                elif start <= cdsStart < end:
-                    coding_exons.append((cdsStart, end))
-                # exon contains coding end
-                elif start <= cdsEnd < end:
-                    coding_exons.append((start, cdsEnd))
-                    break
-    
-                # everything else should be in the middle of the coding region
-                coding_exons.append((start, end))
-    
-            # pull nucleotide sequence of regions
-            orig_seq = []
+            # edge case: exon contains coding start AND end
+            elif start <= cdsStart < end and \
+                 start <= cdsEnd < end:
+                coding_exons.append((cdsStart, cdsEnd))
+                break
+            # exon contains coding start
+            elif start <= cdsStart < end:
+                coding_exons.append((cdsStart, end))
+            # exon contains coding end
+            elif start <= cdsEnd < end:
+                coding_exons.append((start, cdsEnd))
+                break
 
-            for start, end in coding_exons:
-                orig_seq.append(self.pyf_genome[chrom][start:end])
+            # everything else should be in the middle of the coding region
+            coding_exons.append((start, end))
 
-            mut_seq1, mut_seq2 = [], []
-    
-            # make given mutations
-            for genotype_index, seq_list in ((0, mut_seq1), (1, mut_seq2)):
-                pos_in_region = self.c.execute("SELECT * FROM variants WHERE chrom = '%s' AND %s <= pos AND pos <= %s" % (chrom, cdsStart, cdsEnd)).fetchall()
+        # pull nucleotide sequence of regions
+        orig_seq = []
 
-                for row in pos_in_region:
-                    self.pyf_genome[chrom][row["pos"]] = row[stripped_sample].split("/")[genotype_index]
+        for start, end in coding_exons:
+            orig_seq.append(self.pyf_genome[chrom][start:end])
+
+        mut_seq1, mut_seq2 = [], []
+
+        # make given mutations
+        self.pyf_genome[chrom].clearmuts()
+
+        for genotype_index, seq_list in ((0, mut_seq1), (1, mut_seq2)):
+            pos_in_region = self.c.execute("SELECT * FROM variants WHERE chrom = '%s' AND %s <= pos AND pos <= %s" % (chrom, cdsStart, cdsEnd)).fetchall()
+
+            for row in pos_in_region:
+                self.pyf_genome[chrom][row["pos"]] = row[stripped_sample].split("/")[genotype_index]
  
-                for start, end in coding_exons:
-                    seq_list.append(self.pyf_genome[chrom].__getitem__(slice(start, end), True))
-    
-            # translate original and mutated proteins
-            orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
-            mut_protein1 = str(Seq("".join(mut_seq1)).translate(table=1))
-            mut_protein2 = str(Seq("".join(mut_seq2)).translate(table=1))
+            for start, end in coding_exons:
+                seq_list.append(self.pyf_genome[chrom].__getitem__(slice(start, end), True))
 
-            allele1 = []
+        # translate original and mutated proteins
+        orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
+        mut_protein1 = str(Seq("".join(mut_seq1)).translate(table=1))
+        mut_protein2 = str(Seq("".join(mut_seq2)).translate(table=1))
 
-            if orig_protein != mut_protein1:
-                for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein1)):
-                    if orig != mut:
-                        allele1.append((orig, pos, mut))
+        allele1 = [(orig, pos, mut) for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein1)) if orig != mut]
+        allele2 = [(orig, pos, mut) for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein2)) if orig != mut]
 
-            allele2 = []
-
-            if orig_protein != mut_protein2:
-                for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein2)):
-                    if orig != mut:
-                        allele2.append((orig, pos, mut))
-
-            if allele1 or allele2:
-                results[enst] = (allele1, allele2)
-
-        return results
+        return (allele1, allele2)
 
     def nonsym_bg_probs(self):
         """
@@ -534,6 +521,23 @@ class AnalyzeTrio():
 
     def mcda_product(self, values):
         # return weighted product score, combining scores with self.weights
+        pass
+
+    ##
+    ## RUN THE ANALYSIS
+    ##
+
+    def go(self):
+        # for every enst
+            # for every exon
+                # non-synonymous mutations in mother/father/child
+                # mendelian inheritance patterns
+        # for every variant
+            # local AF
+            # global AF
+        # for every gene
+            # network gene placement score
+
         pass
 
 a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
