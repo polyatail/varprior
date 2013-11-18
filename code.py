@@ -1,9 +1,12 @@
+import math
 import copy
+import matplotlib.pyplot as plt
 from blist import blist
 import pyfasta
 from Bio.Seq import Seq
 import os
 import sqlite3
+from sqlite3 import OperationalError, DatabaseError
 import numpy
 import scipy
 import time
@@ -11,46 +14,63 @@ import itertools
 import sys
 from collections import defaultdict
 import networkx
+from networkx.exception import NetworkXNoPath
 import tempfile
 import subprocess
-
-ENSGENE = "20130918_ensGene.tab"
-ENSEMBL_TO_GENE_NAME = "20130918_ensemblToGeneName.tab"
-STRING_NETWORK_LINKS = "human-protein.links.v9.05.txt"
-STRING_NETWORK_ALIAS = "human-protein.aliases.v9.05.txt"
 
 GENOTYPE_VCF = "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20100804/supporting/AFR.2of4intersection_allele_freq.20100804.genotypes.vcf.gz"
 
 class AnalyzeTrio():
-    def __init__(self, sample_names, pedigree, varprior_db, genome_fasta,
-                 vcf_file = None, ensgene_file = None, enst_to_gene_name_file = None, string_alias_file = None):
+    def __init__(self, sample_names, pedigree, varprior_db, network_pickle, genome_fasta,
+                 vcf_file = None, ensgene_file = None, enst_to_gene_name_file = None,
+                 string_alias_file = None, string_links_file = None):
         self.weights = {"mendelian": 1,
                         "non-synonymous": 1,
                         "network": 1,
                         "global_af": 1,
                         "local_af": 1}
+        self.network_score_cutoff = 700
+        self.top_genes = ["ADAMTS8", "AIRE", "AK2", "ATM", "BTK", "CD247",
+                          "CD3D", "CD3G", "CD40LG", "CD8A", "CD8B", "CHD7",
+                          "CIITA", "CORO1A", "CYBB", "DCLRE1C", "DKC1", "DOCK8",
+                          "FOXN1", "IKBKG", "IL2RA", "IL2RG", "IL7R", "ITK",
+                          "JAK3", "LCK", "LIG4", "NBN", "NHEJ1", "ORAI1",
+                          "PNPLA2", "PRKDC", "PTPRC", "RAG1", "RAG2", "RFXANK",
+                          "SH2D1A", "STAT5B", "STIM1", "TAP1", "TAP2", "TAPBP",
+                          "TBX1", "WAS", "XIAP", "ZAP70", "ZBTB1"]
 
         self.sample_names = sample_names
         self.varprior_db = varprior_db
+        self.network_pickle = network_pickle
         self.genome_fasta = genome_fasta
 
         self.pedigree = pedigree
         self.stripped_pedigree = dict([(x, y.replace("-", "")) for x, y in pedigree.items()])
 
-        self.stderr.write("loading db")
-        self.conn, self.c = self.load_db()
+        sys.stderr.write("loading db\n")
+        self.conn, self.c, new_db = self.load_db()
+
+        if new_db:
+            sys.stderr.write("loading annotation\n")
+            self.load_annotation(ensgene_file, enst_to_gene_name_file, string_alias_file)
+    
+            sys.stderr.write("loading vcf\n")
+            self.load_trio_vcf(vcf_file)
+
+        if os.path.isfile(network_pickle):
+            sys.stderr.write("loading network (pickle)\n")
+            self.gene_graph = networkx.read_gpickle(network_pickle)
+        else:
+            sys.stderr.write("loading network\n")
+            self.gene_graph = self.load_string_network(string_links_file)
+
+            networkx.write_gpickle(self.gene_graph, network_pickle)
 
         sys.stderr.write("loading genome\n")
         self.pyf_genome = self.load_genome()
 
-        sys.stderr.write("loading annotation\n")
-        self.load_annotation(ensgene_file, enst_to_gene_name_file, string_alias_file)
-
-        sys.stderr.write("loading vcf\n")
-        self.load_trio_vcf(vcf_file)
-
     ##
-    ## FILE/DATABASE LOADING METHODS
+    ## FILE/DATABASE METHODS
     ##
 
     def load_db(self):
@@ -76,24 +96,43 @@ class AnalyzeTrio():
                     raise ValueError("Corrupt index. Expected %s records, found %s" % (record_count, records_found))
             except (OperationalError, DatabaseError), error:
                 raise ValueError("Problem with SQLite database: %s" % error)
+
+            new_db = False
         else:
             conn = sqlite3.connect(self.varprior_db)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
 
             c.execute("CREATE TABLE metadata (key text, value text)")
-            c.execute("CREATE TABLE ensGene (bin int, name text, chrom text, strand text, txStart int, \
-                                             txEnd int, cdsStart int, cdsEnd int, exonCount int, \
-                                             exonStarts text, exonEnds text, score int, name2 text, \
-                                             cdsStartStat text, cdsEndStat text, exonFrames text)")
+            c.execute("CREATE TABLE ensGene (bin int, name text, chrom text, strand text, txStart int, " \
+                                            "txEnd int, cdsStart int, cdsEnd int, exonCount int, " \
+                                            "exonStarts text, exonEnds text, score int, name2 text, " \
+                                            "cdsStartStat text, cdsEndStat text, exonFrames text)")
             c.execute("CREATE TABLE ensp_to_enst (ensp text, enst text)")   
-            c.execute("CREATE TABLE enst_to_gene_name (enst text, gene_name text)")   
+            c.execute("CREATE TABLE enst_to_gene_name (enst text, gene_name text)")
+            c.execute("CREATE TABLE variants (variant_id int primary key, chrom text, pos int, %s)" % \
+                      ", ".join(["%s text" % x.replace("-", "") for x in self.sample_names]))
+            c.execute("CREATE TABLE gene_tests (gene_name text, network_score float)")
+            c.execute("CREATE TABLE tx_tests (enst text, "\
+                                             "recessive_score float, recessive_data text, "\
+                                             "dominant_score float, dominant_data text, "\
+                                             "comphet_score float, comphet_data text, "\
+                                             "nonsyn_score float, nonsyn_data text)")
+            c.execute("CREATE TABLE variant_tests (variant_id int, local_af float, global_af float)")
 
             c.execute("INSERT INTO metadata VALUES ('version', 'varprior-1.0')")
             c.execute("INSERT INTO metadata VALUES ('records', '-1')")
             c.execute("INSERT INTO metadata VALUES ('variants', '-1')")
 
-        return conn, c
+            c.execute("CREATE INDEX IF NOT EXISTS chrom_index ON variants(chrom);")
+            c.execute("CREATE INDEX IF NOT EXISTS pos_index ON variants(pos);")
+            c.execute("CREATE INDEX IF NOT EXISTS ensp_index ON ensp_to_enst(ensp);")
+            c.execute("CREATE INDEX IF NOT EXISTS enst_index ON enst_to_gene_name(enst);")
+            c.execute("CREATE INDEX IF NOT EXISTS gene_name_index ON enst_to_gene_name(gene_name);")
+
+            new_db = True
+
+        return conn, c, new_db
 
     def load_genome(self):
         return pyfasta.Fasta(self.genome_fasta, record_class=pyfasta.records.MutNpyFastaRecord)
@@ -104,12 +143,14 @@ class AnalyzeTrio():
         if ensgene_file == None or \
            enst_to_gene_name_file == None or \
            string_alias_file == None:
-            raise ValueError("Cannot create database without input files")
+            raise ValueError("Cannot load annotation without input files")
 
         # load ensemblToGeneName (translates ENST -> short names, e.g. IL2RG)
         for line in [x.strip().split() for x in open(enst_to_gene_name_file)]:
             self.c.execute("INSERT INTO enst_to_gene_name VALUES ('%s', '%s')" % (line[0], line[1]))
 
+        self.c.execute("INSERT INTO gene_tests SELECT gene_name, NULL FROM enst_to_gene_name GROUP BY gene_name")
+ 
         # load string aliases (translates ENSP -> ENST/ENSG)
         for line in [x.strip().split() for x in open(string_alias_file)]:
             if line[2].startswith("ENST"):
@@ -121,6 +162,8 @@ class AnalyzeTrio():
                 ensgene_keys = line
             else:
                 self.c.execute("INSERT INTO ensGene VALUES (%s)" % ", ".join(["'%s'" % x for x in line]))
+
+        self.c.execute("INSERT INTO tx_tests SELECT name AS enst, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL FROM ensGene")
 
         self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'records'" % line_num)
 
@@ -154,8 +197,6 @@ class AnalyzeTrio():
             if vcf_file == None:
                 raise ValueError("Database empty and no vcf_file specified")
 
-            self.c.execute("CREATE TABLE variants (chrom text, pos int, %s)" % ", ".join(["%s text" % x.replace("-", "") for x in self.sample_names]))
-
             records = 0
 
             for line in open(vcf_file, "r"):
@@ -188,15 +229,30 @@ class AnalyzeTrio():
 
                     sample_to_snp[sample] = genotype_coded
 
-                self.c.execute("INSERT INTO variants VALUES ('%s', '%s', %s)" % (chrom, pos, ", ".join(["'%s'" % sample_to_snp[x] for x in self.sample_names])))
+                self.c.execute("INSERT INTO variants VALUES (NULL, '%s', '%s', %s)" % (chrom, pos, ", ".join(["'%s'" % sample_to_snp[x] for x in self.sample_names])))
                 records += 1
 
-            self.c.execute("CREATE INDEX IF NOT EXISTS chrom_index ON variants(chrom);")
-            self.c.execute("CREATE INDEX IF NOT EXISTS pos_index ON variants(pos);")
+            self.c.execute("INSERT INTO variant_tests SELECT variant_id, NULL, NULL FROM variants")
 
             self.c.execute("INSERT INTO metadata VALUES ('vcf_file', '%s')" % vcf_file)
             self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % records)
             self.conn.commit()
+
+    def ensp_to_gene_name(self, ensp):
+        assert self.conn, self.c
+
+        gene_names = self.c.execute("SELECT enst_to_gene_name.gene_name FROM enst_to_gene_name, " \
+                                    "ensp_to_enst WHERE ensp_to_enst.enst = enst_to_gene_name.enst " \
+                                    "AND ensp_to_enst.ensp = '%s'" % ensp)
+
+        return list(set([x["gene_name"] for x in gene_names]))
+
+    def gene_names(self):
+        assert self.conn, self.c
+
+        gene_names = self.c.execute("SELECT gene_name FROM enst_to_gene_name").fetchall()
+
+        return list(set([x["gene_name"] for x in gene_names]))
 
     ##
     ## INHERITANCE FILTER METHODS
@@ -301,15 +357,6 @@ class AnalyzeTrio():
 
             return True
 
-    def mendelian_bg_probs(self):
-        """
-        Determine background distribution of mendelian inheritance patterns
-
-        Single-variant tests are no problem, but what about compound het?
-        """
-
-        pass
-
     ##
     ## GENOME/CODING POTENTIAL METHODS
     ##
@@ -342,7 +389,7 @@ class AnalyzeTrio():
 
         # non-coding
         if cdsStart == cdsEnd:
-            continue
+            return ([], [])
 
         coding_exons = []
 
@@ -397,12 +444,6 @@ class AnalyzeTrio():
 
         return (allele1, allele2)
 
-    def nonsym_bg_probs(self):
-        """
-        Look at all transcripts for mutations not in either parent, save in table
-        """
-        pass
-
     ##
     ## VCF ALLELE FREQUENCY METHODS
     ##
@@ -456,21 +497,46 @@ class AnalyzeTrio():
     ## NETWORK METHODS
     ##
 
-    def load_string_network(self):
+    def load_string_network(self, string_network_links):
+        # NOTE: scores are 1000 - the score so we can use shortest path algorithms
+        # NOTE: we don't use a multigraph and instead update to keep edge weights minimum
+        assert self.conn, self.c
+
         # generate STRING graph with gene names
         gene_graph = networkx.Graph(directed=False)
-        gene_graph.add_nodes_from(gene_name_to_ensp.keys())
+        sys.stderr.write("    nodes\n")
+        gene_graph.add_nodes_from(self.gene_names())
         
-        for line in [x.strip().split() for x in open(STRING_NETWORK_LINKS)]:
-            if float(line[2]) < float(sys.argv[1]):
+        links = [x.strip().split() for x in open(string_network_links)]
+
+        for line_num, line in enumerate(links):
+            if float(line[2]) < self.network_score_cutoff:
                 continue
-        
-            gene1 = ensp_to_gene_name[line[0][5:]]
-            gene2 = ensp_to_gene_name[line[1][5:]]
+
+            gene1 = self.ensp_to_gene_name(line[0][5:])
+            gene2 = self.ensp_to_gene_name(line[1][5:])
         
             for node1, node2 in itertools.product(gene1, gene2):
-                gene_graph.add_edge(node1, node2, weight=float(line[2]))
+                weight = 1000 - float(line[2])
 
+                try:
+                    if gene_graph[node1][node2]["weight"] > weight:
+                        gene_graph[node1][node2]["weight"] = weight
+                        continue
+                except KeyError:
+                    gene_graph.add_edge(node1, node2, weight=weight)
+
+            if line_num % 100 == 0:
+                num_stars = int(math.ceil(line_num / float(len(links)) * 10))
+                progress = ["*"] * num_stars + [" "] * (10 - num_stars)
+
+                sys.stderr.write("\r    edges [%s]" % "".join(progress))
+
+        sys.stderr.write("\n")
+
+        return gene_graph
+
+    @staticmethod
     def find_connected_genes(node_list, max_depth, graph):
         # find genes within n connections of given gene
         assert isinstance(node_list, list)
@@ -492,16 +558,13 @@ class AnalyzeTrio():
         return set(connected_nodes)
 
     def plot_network(self):
-        # actually do stuff
-        import matplotlib.pyplot as plt
-    
-        neighbors = list(itertools.chain(*[gene_graph.neighbors(x) for x in sys.argv[2:]]))
-        subgraph = gene_graph.subgraph(neighbors + sys.argv[2:])
+        neighbors = list(itertools.chain(*[self.gene_graph.neighbors(x) for x in self.top_genes]))
+        subgraph = self.gene_graph.subgraph(neighbors + self.top_genes)
         pos = networkx.graphviz_layout(subgraph, prog="neato")
-        labels = dict(zip(neighbors + sys.argv[2:], neighbors + sys.argv[2:]))
+        labels = dict(zip(neighbors + sys.argv[2:], neighbors + self.top_genes))
     
         networkx.draw_networkx_nodes(subgraph, pos, nodelist=neighbors, node_color="#fdb462")
-        networkx.draw_networkx_nodes(subgraph, pos, nodelist=sys.argv[2:], node_color="#80b1d3")
+        networkx.draw_networkx_nodes(subgraph, pos, nodelist=self.top_genes, node_color="#80b1d3")
     
         networkx.draw_networkx_edges(subgraph, pos, alpha=0.1)
     
@@ -511,7 +574,30 @@ class AnalyzeTrio():
         plt.axis("off")
         plt.show()
 
-    def score_gene_placement(self, gene_name):
+    def score_all_genes(self):
+        gene_names = self.gene_names()
+
+        for gene in gene_names:
+            # shortest path by weight to each of top genes
+            all_weights = []
+            no_paths = 0
+
+            for top_gene in self.top_genes:
+                try:
+                    path = networkx.astar_path(self.gene_graph, gene, top_gene, weight="weight")
+                except NetworkXNoPath:
+                    no_paths += 1
+                    continue
+
+                for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
+                    all_weights.append(self.gene_graph[node_from][node_to]["weight"])
+
+            score = sum([math.log(x) for x in all_weights]) / (len(self.top_genes) - no_paths + 1) ** 0.5
+            print gene, score, no_paths
+
+            self.c.execute("UPDATE gene_tests SET network_score = '%s' WHERE gene_name = '%s'" % (score, gene)) 
+ 
+    def score_gene_percentile(self, gene_name):
         """
         Return a score for a gene's placement in the network
         """
@@ -550,10 +636,13 @@ class AnalyzeTrio():
 a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
                 "varprior.db",
+                "varprior.gpickle",
                 "hg19.fa",
-                "exomes_49.vcf", "20130918_ensGene.tab", "20130918_ensemblToGeneName.tab", "human-protein.aliases.v9.05.txt")
+                "exomes_49.vcf",
+                "20130918_ensGene.tab", "20130918_ensemblToGeneName.tab",
+                "human-protein.aliases.v9.05.txt", "human-protein.links.v9.05.txt")
 
-print a.non_synonymous("IL23R", "jp-scid7a")
+#print a.non_synonymous("IL23R", "jp-scid7a")
 #print a.mendelian_filter(a._mf_compound_het_denovo, "chr1", 1000000, 2000000, k=2)
 #print a.mendelian_filter(a._mf_recessive, "chr1", 1000000, 2000000)
 #print a.mendelian_filter(a._mf_denovo_dominant, "chr1", 1000000, 2000000)
