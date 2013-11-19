@@ -131,11 +131,19 @@ class AnalyzeTrio():
             c.execute("INSERT INTO metadata VALUES ('records', '-1')")
             c.execute("INSERT INTO metadata VALUES ('variants', '-1')")
 
+            c.execute("CREATE INDEX IF NOT EXISTS ensgene_index ON ensGene(name);")
+            c.execute("CREATE INDEX IF NOT EXISTS ensgene_index2 ON ensGene(chrom);")
+            c.execute("CREATE INDEX IF NOT EXISTS ensgene_index3 ON ensGene(cdsStart);")
+            c.execute("CREATE INDEX IF NOT EXISTS ensgene_index4 ON ensGene(cdsEnd);")
+            c.execute("CREATE INDEX IF NOT EXISTS ensgene_index5 ON ensGene(bin);")
             c.execute("CREATE INDEX IF NOT EXISTS chrom_index ON variants(chrom);")
             c.execute("CREATE INDEX IF NOT EXISTS pos_index ON variants(pos);")
             c.execute("CREATE INDEX IF NOT EXISTS ensp_index ON ensp_to_enst(ensp);")
             c.execute("CREATE INDEX IF NOT EXISTS enst_index ON enst_to_gene_name(enst);")
             c.execute("CREATE INDEX IF NOT EXISTS gene_name_index ON enst_to_gene_name(gene_name);")
+            c.execute("CREATE INDEX IF NOT EXISTS variant_id_index ON variants(variant_id);")
+            c.execute("CREATE INDEX IF NOT EXISTS variant_id_index2 ON variant_tests(variant_id);")
+            c.execute("CREATE INDEX IF NOT EXISTS variant_id_index3 ON variant_nonsyn(variant_id);")
 
             new_db = True
 
@@ -240,6 +248,28 @@ class AnalyzeTrio():
             self.c.execute("INSERT INTO metadata VALUES ('vcf_file', '%s')" % vcf_file)
             self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % records)
             self.conn.commit()
+
+    @staticmethod
+    def region2bin (start, end, join = False):
+        """ 
+        Converts a region to a list of bins that it may belong to, including largest
+        and smallest bins.
+
+        If join is True, will return a comma-delimited list of bins, otherwise will
+        return a list.
+        """
+
+        bins = [0, 1]
+
+        bins.extend(range(1 + (start >> 26), 2 + ((end - 1) >> 26)))
+        bins.extend(range(9 + (start >> 23), 10 + ((end - 1) >> 23)))
+        bins.extend(range(73 + (start >> 20), 74 + ((end - 1) >> 20)))
+        bins.extend(range(585 + (start >> 17), 586 + ((end - 1) >> 17)))
+
+        if join == True:
+            return ", ".join(map(str, set(bins)))
+        else:
+            return list(set(bins))
 
     def ensp_to_gene_name(self, ensp):
         assert self.conn, self.c
@@ -446,7 +476,7 @@ class AnalyzeTrio():
 
         for start, end in coding_exons:
             orig_seq.append(self.pyf_genome[chrom][start:end])
-
+ 
         # make given mutations
         if mut == False and stripped_sample:
             mut_seq1, mut_seq2 = [], []
@@ -735,11 +765,12 @@ class AnalyzeTrio():
             all_seqs = filter(lambda x: x != ".", sum([variant[x].split("/") for x in self.stripped_samples], []))
             nonref_seqs = set(all_seqs).difference(self.pyf_genome[variant["chrom"]][variant["pos"]])
 
+            # non-synonymous mutations
             if nonref_seqs:
                 # what transcripts overlap this variant
                 enst_overlap = [x["name"] for x in self.c.execute( \
-                   "SELECT name FROM ensGene WHERE chrom = '%s' AND cdsStart <= %s AND %s <= cdsEnd" % \
-                   (variant["chrom"], variant["pos"], variant["pos"])).fetchall()]
+                   "SELECT name FROM ensGene WHERE bin IN (%s) AND chrom = '%s' AND cdsStart <= %s AND %s <= cdsEnd" % \
+                   (self.region2bin(variant["pos"], variant["pos"] + 1, True), variant["chrom"], variant["pos"], variant["pos"])).fetchall()]
 
                 # any nonsyn muts?
                 for enst in enst_overlap:
@@ -747,7 +778,8 @@ class AnalyzeTrio():
                         muts = self.non_synonymous_tx(enst, mut = {"pos": variant["pos"], "seq": seq})
 
                         for mut in muts:
-                            self.c.execute("INSERT INTO variant_nonsyn VALUES (%s, '%s', '%s', '%s')" % (variant["variant_id"], seq, enst, "".join(map(str, mut))))
+                            self.c.execute("INSERT INTO variant_nonsyn (variant_id, allele, enst, mut) " \
+                                           "VALUES (%s, '%s', '%s', '%s')" % (variant["variant_id"], seq, enst, "".join(map(str, mut))))
 
             # allele freqencies
             for seq in nonref_seqs:
