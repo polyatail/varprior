@@ -1,9 +1,11 @@
+import os
 import math
 import copy
 import matplotlib.pyplot as plt
 from blist import blist
 import pyfasta
 from Bio.Seq import Seq
+from Bio.Data.CodonTable import TranslationError
 import os
 import sqlite3
 from sqlite3 import OperationalError, DatabaseError
@@ -40,9 +42,17 @@ class AnalyzeTrio():
                           "TBX1", "WAS", "XIAP", "ZAP70", "ZBTB1"]
 
         self.sample_names = sample_names
+        self.stripped_samples = [x.replace("-", "") for x in sample_names]
+
         self.varprior_db = varprior_db
         self.network_pickle = network_pickle
         self.genome_fasta = genome_fasta
+
+        self.vcf_file = vcf_file
+        self.ensgene_file = ensgene_file
+        self.enst_to_gene_name_file = enst_to_gene_name_file
+        self.string_alias_file = string_alias_file
+        self.string_links_file = string_links_file
 
         self.pedigree = pedigree
         self.stripped_pedigree = dict([(x, y.replace("-", "")) for x, y in pedigree.items()])
@@ -110,15 +120,12 @@ class AnalyzeTrio():
                                             "cdsStartStat text, cdsEndStat text, exonFrames text)")
             c.execute("CREATE TABLE ensp_to_enst (ensp text, enst text)")   
             c.execute("CREATE TABLE enst_to_gene_name (enst text, gene_name text)")
-            c.execute("CREATE TABLE variants (variant_id int primary key, chrom text, pos int, %s)" % \
+            c.execute("CREATE TABLE variants (variant_id integer primary key, chrom text, pos int, %s)" % \
                       ", ".join(["%s text" % x.replace("-", "") for x in self.sample_names]))
-            c.execute("CREATE TABLE gene_tests (gene_name text, network_score float)")
-            c.execute("CREATE TABLE tx_tests (enst text, "\
-                                             "recessive_score float, recessive_data text, "\
-                                             "dominant_score float, dominant_data text, "\
-                                             "comphet_score float, comphet_data text, "\
-                                             "nonsyn_score float, nonsyn_data text)")
-            c.execute("CREATE TABLE variant_tests (variant_id int, local_af float, global_af float)")
+            c.execute("CREATE TABLE gene_tests (gene_name text, network_score float, network_score_percentile float)")
+            c.execute("CREATE TABLE tx_mendel (enst text, model text, chrom test, pos1 int, pos2 int)")
+            c.execute("CREATE TABLE variant_tests (variant_id int, allele text, local_af float, global_af float)")
+            c.execute("CREATE TABLE variant_nonsyn (variant_id int, allele text, enst text, mut text)")
 
             c.execute("INSERT INTO metadata VALUES ('version', 'varprior-1.0')")
             c.execute("INSERT INTO metadata VALUES ('records', '-1')")
@@ -149,7 +156,7 @@ class AnalyzeTrio():
         for line in [x.strip().split() for x in open(enst_to_gene_name_file)]:
             self.c.execute("INSERT INTO enst_to_gene_name VALUES ('%s', '%s')" % (line[0], line[1]))
 
-        self.c.execute("INSERT INTO gene_tests SELECT gene_name, NULL FROM enst_to_gene_name GROUP BY gene_name")
+        self.c.execute("INSERT INTO gene_tests (gene_name) SELECT gene_name FROM enst_to_gene_name GROUP BY gene_name")
  
         # load string aliases (translates ENSP -> ENST/ENSG)
         for line in [x.strip().split() for x in open(string_alias_file)]:
@@ -162,8 +169,6 @@ class AnalyzeTrio():
                 ensgene_keys = line
             else:
                 self.c.execute("INSERT INTO ensGene VALUES (%s)" % ", ".join(["'%s'" % x for x in line]))
-
-        self.c.execute("INSERT INTO tx_tests SELECT name AS enst, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL FROM ensGene")
 
         self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'records'" % line_num)
 
@@ -232,8 +237,6 @@ class AnalyzeTrio():
                 self.c.execute("INSERT INTO variants VALUES (NULL, '%s', '%s', %s)" % (chrom, pos, ", ".join(["'%s'" % sample_to_snp[x] for x in self.sample_names])))
                 records += 1
 
-            self.c.execute("INSERT INTO variant_tests SELECT variant_id, NULL, NULL FROM variants")
-
             self.c.execute("INSERT INTO metadata VALUES ('vcf_file', '%s')" % vcf_file)
             self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % records)
             self.conn.commit()
@@ -250,9 +253,33 @@ class AnalyzeTrio():
     def gene_names(self):
         assert self.conn, self.c
 
-        gene_names = self.c.execute("SELECT gene_name FROM enst_to_gene_name").fetchall()
+        gene_names = self.c.execute("SELECT gene_name FROM enst_to_gene_name GROUP BY gene_name").fetchall()
 
-        return list(set([x["gene_name"] for x in gene_names]))
+        for gene in [x["gene_name"] for x in gene_names]:
+            yield gene
+
+    def tx_names(self):
+        assert self.conn, self.c
+
+        tx_names = self.c.execute("SELECT enst FROM enst_to_gene_name GROUP BY enst").fetchall()
+
+        for enst in ([x["enst"] for x in tx_names]):
+            yield enst
+
+    def fetch_tx(self, enst):
+        assert self.conn, self.c
+
+        data = self.c.execute("SELECT * FROM ensGene WHERE name = '%s'" % enst).fetchone()
+
+        return data
+
+    def variants(self):
+        assert self.conn, self.c
+
+        variants = self.c.execute("SELECT * FROM variants").fetchall()
+
+        for v in variants:
+            yield v
 
     ##
     ## INHERITANCE FILTER METHODS
@@ -361,7 +388,7 @@ class AnalyzeTrio():
     ## GENOME/CODING POTENTIAL METHODS
     ##
 
-    def non_synonymous_gene(self, gene_name, sample):
+    def non_synonymous_gene(self, gene_name, stripped_sample = False, mut = False):
         # given gene name and set of SNPs, does protein product potentially
         # yield a different protein product from that expected?
         # snp_list = ((pos, mut), (pos, mut), ...)
@@ -376,12 +403,9 @@ class AnalyzeTrio():
  
         # examine each transcript isoform of this gene
         for enst in all_enst:
-            results[enst] = self.non_synonymous_enst(enst, sample)
+            results[enst] = self.non_synonymous_enst(enst, stripped_sample, mut)
 
-    def non_synonymous_enst(self, enst, sample):
-        # sample can't have dashes in it
-        stripped_sample = sample.replace("-", "")
-   
+    def non_synonymous_tx(self, enst, stripped_sample = False, mut = False):
         # fetch exons
         chrom = self.c.execute("SELECT chrom FROM ensGene WHERE name = '%s'" % enst).fetchone()[0]
         exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in self.c.execute("SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % enst).fetchone()]
@@ -406,6 +430,7 @@ class AnalyzeTrio():
             # exon contains coding start
             elif start <= cdsStart < end:
                 coding_exons.append((cdsStart, end))
+                break
             # exon contains coding end
             elif start <= cdsEnd < end:
                 coding_exons.append((start, cdsEnd))
@@ -414,35 +439,65 @@ class AnalyzeTrio():
             # everything else should be in the middle of the coding region
             coding_exons.append((start, end))
 
+        self.pyf_genome[chrom].clearmuts()
+
         # pull nucleotide sequence of regions
         orig_seq = []
 
         for start, end in coding_exons:
             orig_seq.append(self.pyf_genome[chrom][start:end])
 
-        mut_seq1, mut_seq2 = [], []
-
         # make given mutations
-        self.pyf_genome[chrom].clearmuts()
+        if mut == False and stripped_sample:
+            mut_seq1, mut_seq2 = [], []
 
-        for genotype_index, seq_list in ((0, mut_seq1), (1, mut_seq2)):
-            pos_in_region = self.c.execute("SELECT * FROM variants WHERE chrom = '%s' AND %s <= pos AND pos <= %s" % (chrom, cdsStart, cdsEnd)).fetchall()
+            for genotype_index, seq_list in ((0, mut_seq1), (1, mut_seq2)):
+                pos_in_region = self.c.execute("SELECT * FROM variants WHERE chrom = '%s' AND %s <= pos AND pos <= %s" % (chrom, cdsStart, cdsEnd)).fetchall()
+    
+                for row in pos_in_region:
+                    seq = row[stripped_sample].split("/")[genotype_index]
 
-            for row in pos_in_region:
-                self.pyf_genome[chrom][row["pos"]] = row[stripped_sample].split("/")[genotype_index]
- 
+                    if seq == ".":
+                        continue
+
+                    self.pyf_genome[chrom][row["pos"]] = seq
+     
+                for start, end in coding_exons:
+                    seq_list.append(self.pyf_genome[chrom].__getitem__(slice(start, end), True))
+
+            # translate original and mutated proteins
+            try:
+                orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
+                mut_protein1 = str(Seq("".join(mut_seq1)).translate(table=1))
+                mut_protein2 = str(Seq("".join(mut_seq2)).translate(table=1))
+            except TranslationError:
+                sys.stderr.write("Transcript %s could not be translated\n" % enst)
+                return ([], [])
+    
+            allele1 = [(orig, pos, mut) for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein1)) if orig != mut]
+            allele2 = [(orig, pos, mut) for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein2)) if orig != mut]
+
+            return (allele1, allele2)
+        elif stripped_sample == False and mut:
+            if mut["seq"] != ".":
+                self.pyf_genome[chrom][mut["pos"]] = mut["seq"]
+
+            mut_seq = []
+
             for start, end in coding_exons:
-                seq_list.append(self.pyf_genome[chrom].__getitem__(slice(start, end), True))
+                mut_seq.append(self.pyf_genome[chrom].__getitem__(slice(start, end), True))
 
-        # translate original and mutated proteins
-        orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
-        mut_protein1 = str(Seq("".join(mut_seq1)).translate(table=1))
-        mut_protein2 = str(Seq("".join(mut_seq2)).translate(table=1))
+            try:
+                orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
+                mut_protein = str(Seq("".join(mut_seq)).translate(table=1))
+            except TranslationError:
+                sys.stderr.write("Transcript %s could not be translated\n" % enst)
 
-        allele1 = [(orig, pos, mut) for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein1)) if orig != mut]
-        allele2 = [(orig, pos, mut) for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein2)) if orig != mut]
+            diffs = [(orig, pos, mut) for pos, (orig, mut) in enumerate(zip(orig_protein, mut_protein)) if orig != mut]
 
-        return (allele1, allele2)
+            return diffs
+        else:
+            raise ValueError("Must specify a mutation or a sample to pull variants from")
 
     ##
     ## VCF ALLELE FREQUENCY METHODS
@@ -465,18 +520,18 @@ class AnalyzeTrio():
     
         return af_table
 
-    @staticmethod
-    def af_from_vcf(vcf_file):
+    def af_from_vcf(self, vcf_file):
         # allele frequencies from any given vcf
+        af_table = dict([(x, {}) for x in self.pyf_genome.keys()])
+
         vcftools_out = tempfile.NamedTemporaryFile()
     
-        vcftools = subprocess.Popen(["vcftools", "--vcf", vcf_in,
-                                     "--freq", "--out", vcftools_out.name])
+        vcftools = subprocess.Popen(["vcftools", "--vcf", vcf_file,
+                                     "--freq", "--out", vcftools_out.name],
+                                    stdout=open(os.devnull))
     
         while vcftools.poll() == None:
             time.sleep(0.5)
-    
-        af_table = {}
     
         with open("%s.frq" % vcftools_out.name) as fp:
             fp.next()
@@ -484,12 +539,12 @@ class AnalyzeTrio():
             for line in fp:
                 line_split = line.strip().split()
     
-                tmp_af = {}
-    
                 for allele, freq in [x.split(":") for x in line_split[4:]]:
-                    tmp_af[allele] = float(freq)
-    
-                af_table[int(line_split[1])] = tmp_af
+                    try:
+                        af_table["chr%s" % line_split[0]][int(line_split[1])][allele] = float(freq)
+                    except KeyError:
+                        af_table["chr%s" % line_split[0]][int(line_split[1])] = {}
+                        af_table["chr%s" % line_split[0]][int(line_split[1])][allele] = float(freq)
     
         return af_table
 
@@ -601,7 +656,20 @@ class AnalyzeTrio():
         """
         Return a score for a gene's placement in the network
         """
-        pass
+
+        if gene_name in self.top_genes:
+            return 1
+
+        assert self.conn, self.c
+
+        try:
+            self.network_score_hist
+        except NameError:
+            self.network_score_hist = numpy.array([x["network_score"] for x in self.c.execute("SELECT network_score FROM gene_tests").fetchall()])
+
+        score = self.c.execute("SELECT network_score FROM gene_tests WHERE gene_name = '%s'" % gene_name).fetchone()[0]
+
+        return scipy.stats.percentileofscore(self.network_score_hist, score)
 
     ##
     ## STATISTICS METHODS
@@ -620,18 +688,90 @@ class AnalyzeTrio():
     ## RUN THE ANALYSIS
     ##
 
-    def go(self):
-        # for every enst
-            # for every exon
-                # non-synonymous mutations in mother/father/child
-                # mendelian inheritance patterns
-        # for every variant
-            # local AF
-            # global AF
+    def go_gene(self):
         # for every gene
+        for gene in self.gene_names():
             # network gene placement score
+            score = self.score_gene_percentile(gene)
 
-        pass
+            self.c.execute("UPDATE gene_tests SET network_score_percentile = '%s' WHERE gene_name = '%s'" % (score, gene)) 
+
+    def go_tx(self):
+        # for every enst
+        for enst in self.tx_names():
+            # fetch tx data
+            enst_data = self.fetch_tx(enst)
+            chrom, txStart, txEnd = [enst_data[x] for x in ("chrom", "txStart", "txEnd")]
+
+            # mendelian inheritance patterns
+            comphet = self.mendelian_filter(self._mf_compound_het_denovo, chrom, txStart, txEnd, k=2)
+            recessive = self.mendelian_filter(self._mf_recessive, chrom, txStart, txEnd)
+            dominant = self.mendelian_filter(self._mf_denovo_dominant, chrom, txStart, txEnd)
+
+            for test, results in zip(("comphet", "recessive", "dominant"), (comphet, recessive, dominant)):
+                for result in results:
+                    pos1 = result[1]
+                    pos2 = "NULL" if len(result) == 2 else result[2]
+    
+                    self.c.execute("INSERT INTO tx_mendel VALUES ('%s', '%s', '%s', %s, %s)" % (enst, test, chrom, pos1, pos2))
+
+# FIXME: THIS CODE CANT WORK AS IS
+#            # nonsyn muts in child but not parents
+#            mother_nonsyn, father_nonsyn, child_nonsyn = \
+#                [self.non_synonymous_tx(enst, stripped_sample = self.stripped_pedigree[x]) for x in ("mother", "father", "child")]
+#
+#            child_diffs = set(sum(child_nonsyn, [])).difference(sum(mother_nonsyn, []) + sum(father_nonsyn, []))
+# FIXME
+
+    def go_variant(self):
+        # load local allele frequencies
+        local_af = self.af_from_vcf(self.vcf_file)
+
+        # for every variant
+        processed = 0
+
+        for variant in self.variants():
+            # what are the non-reference alleles?
+            all_seqs = filter(lambda x: x != ".", sum([variant[x].split("/") for x in self.stripped_samples], []))
+            nonref_seqs = set(all_seqs).difference(self.pyf_genome[variant["chrom"]][variant["pos"]])
+
+            if nonref_seqs:
+                # what transcripts overlap this variant
+                enst_overlap = [x["name"] for x in self.c.execute( \
+                   "SELECT name FROM ensGene WHERE chrom = '%s' AND cdsStart <= %s AND %s <= cdsEnd" % \
+                   (variant["chrom"], variant["pos"], variant["pos"])).fetchall()]
+
+                # any nonsyn muts?
+                for enst in enst_overlap:
+                    for seq in nonref_seqs:
+                        muts = self.non_synonymous_tx(enst, mut = {"pos": variant["pos"], "seq": seq})
+
+                        for mut in muts:
+                            self.c.execute("INSERT INTO variant_nonsyn VALUES (%s, '%s', '%s', '%s')" % (variant["variant_id"], seq, enst, "".join(map(str, mut))))
+
+            # allele freqencies
+            for seq in nonref_seqs:
+                # local
+                try:
+                    seq_af = local_af[variant["chrom"]][variant["pos"]][seq]
+                except KeyError:
+                    import pdb; pdb.set_trace()
+
+                if int(self.c.execute("SELECT COUNT(*) FROM variant_tests WHERE variant_id = '%s' AND allele = '%s'" % (variant["variant_id"], seq)).fetchone()[0]) == 0:
+                    self.c.execute("INSERT INTO variant_tests (variant_id, allele, local_af) VALUES (%s, '%s', %s)" % (variant["variant_id"], seq, seq_af))
+                else:
+                    self.c.execute("UPDATE variant_tests SET local_af = '%s' WHERE variant_id = '%s' AND allele = '%s'" % (seq_af, variant["variant_id"], seq))
+
+                # global
+
+            processed += 1
+
+            if processed % 100 == 0:
+                sys.stderr.write("\rprocessed %s" % processed)
+
+        sys.stderr.write("\n")
+
+        self.conn.commit()
 
 a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
