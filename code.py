@@ -1,12 +1,9 @@
 import os
 import math
-import copy
 import matplotlib.pyplot as plt
-from blist import blist
 import pyfasta
 from Bio.Seq import Seq
 from Bio.Data.CodonTable import TranslationError
-import os
 import sqlite3
 from sqlite3 import OperationalError, DatabaseError
 import numpy
@@ -14,7 +11,6 @@ import scipy
 import time
 import itertools
 import sys
-from collections import defaultdict
 import networkx
 from networkx.exception import NetworkXNoPath
 import tempfile
@@ -610,15 +606,17 @@ class AnalyzeTrio():
       with open("%s.frq" % vcftools_out.name) as fp:
         fp.next()
         
-      for line in fp:
-        line_split = line.strip().split()
+        for line in fp:
+          line_split = line.strip().split()
         
-        for allele, freq in [x.split(":") for x in line_split[4:]]:
-          try:
-            af_table["chr%s" % line_split[0]][int(line_split[1])][allele] = float(freq)
-          except KeyError:
-            af_table["chr%s" % line_split[0]][int(line_split[1])] = {}
-            af_table["chr%s" % line_split[0]][int(line_split[1])][allele] = float(freq)
+          for allele, freq in [x.split(":") for x in line_split[4:]]:
+            chrom = "chr%s" % line_split[0]
+
+            try:
+              af_table[chrom][int(line_split[1])][allele] = float(freq)
+            except KeyError:
+              af_table[chrom][int(line_split[1])] = {}
+              af_table[chrom][int(line_split[1])][allele] = float(freq)
 
       os.unlink("%s.frq" % vcftools_out.name)
 
