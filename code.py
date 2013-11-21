@@ -178,9 +178,9 @@ class AnalyzeTrio():
       self.c.execute(
         "INSERT INTO enst_to_gene_name VALUES ('%s', '%s')" % (line[0], line[1]))
 
-      self.c.execute(
-        "INSERT INTO gene_tests (gene_name) SELECT gene_name FROM " \
-        "enst_to_gene_name GROUP BY gene_name")
+    self.c.execute(
+      "INSERT INTO gene_tests (gene_name) SELECT gene_name FROM " \
+      "enst_to_gene_name GROUP BY gene_name")
  
     # load string aliases (translates ENSP -> ENST/ENSG)
     for line in [x.strip().split() for x in open(string_alias_file)]:
@@ -241,33 +241,34 @@ class AnalyzeTrio():
                 "Specified sample (%s) not in VCF (%s)" % (error.split()[0],
                                                            vcf_file))
 
-            continue
+          continue
+
+        # parse rest of file
+        line_split = line.strip().split()
+        chrom = "chr%s" % line_split[0]
     
-          line_split = line.strip().split()
-          chrom = "chr%s" % line_split[0]
+        sample_to_snp = {}
     
-          sample_to_snp = {}
-    
-          for sample, column in kept_cols: 
-            pos = int(line_split[1])
-            ref = line_split[3]
-            alt = [(str(x + 1), y) for x, y in enumerate(line_split[4].split(","))]
+        for sample, column in kept_cols: 
+          pos = int(line_split[1])
+          ref = line_split[3]
+          alt = [(str(x + 1), y) for x, y in enumerate(line_split[4].split(","))]
         
-            code = dict([(str(0), ref)] + alt)
+          code = dict([(str(0), ref)] + alt)
         
-            genotype = line_split[column][:3]
-            genotype_coded = reduce(lambda x, y: x.replace(y, code[y]), code, genotype)
+          genotype = line_split[column][:3]
+          genotype_coded = reduce(lambda x, y: x.replace(y, code[y]), code, genotype)
 
-            sample_to_snp[sample] = genotype_coded
+          sample_to_snp[sample] = genotype_coded
 
-          self.c.execute("INSERT INTO variants VALUES (NULL, '%s', '%s', %s)" %
-            (chrom, pos,
-             ", ".join(["'%s'" % sample_to_snp[x] for x in self.sample_names])))
-          records += 1
+        self.c.execute("INSERT INTO variants VALUES (NULL, '%s', '%s', %s)" %
+          (chrom, pos,
+           ", ".join(["'%s'" % sample_to_snp[x] for x in self.sample_names])))
+        records += 1
 
-    self.c.execute("INSERT INTO metadata VALUES ('vcf_file', '%s')" % vcf_file)
-    self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % records)
-    self.conn.commit()
+      self.c.execute("INSERT INTO metadata VALUES ('vcf_file', '%s')" % vcf_file)
+      self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % records)
+      self.conn.commit()
 
   @staticmethod
   def region2bin (start, end, join = False):
@@ -731,10 +732,13 @@ class AnalyzeTrio():
 
       score = sum([math.log(x) for x in all_weights]) / \
               (len(self.top_genes) - no_paths + 1) ** 0.5
+
       print gene, score, no_paths
 
       self.c.execute(
-        "UPDATE gene_tests SET network_score = '%s' WHERE gene_name = '%s'" % (score, gene)) 
+        "UPDATE gene_tests SET network_score = '%s' WHERE gene_name = '%s'" % (score, gene))
+
+    self.conn.commit()
  
   def score_gene_percentile(self, gene_name):
     if gene_name in self.top_genes:
@@ -763,15 +767,24 @@ class AnalyzeTrio():
     return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / \
                          scipy.misc.factorial(k - 1, exact=True))
 
-  def mcda_product(self, values):
+  def mcda_product(self, score_dict):
+    # from http://en.wikipedia.org/wiki/Weighted_product_model
     # return weighted product score, combining scores with self.weights
-    pass
+    total_score = 1
+
+    for k, v in score_dict:
+        total_score *= float(v) ** self.weights[k]
+
+    return total_score
 
   ##
   ## RUN THE ANALYSIS
   ##
 
   def go_gene(self):
+    # raw scores for network placement
+    self.score_all_genes()
+
     # for every gene
     for gene in self.gene_names():
       # network gene placement score
@@ -779,6 +792,17 @@ class AnalyzeTrio():
 
       self.c.execute(
         "UPDATE gene_tests SET network_score_percentile = '%s' WHERE gene_name = '%s'" % (score, gene)) 
+
+      # for every transcript that belongs to this gene
+        # turn mendelian inheritance into some kind of p-value
+
+        # for every non-synonymous variant in this transcript
+          # turn local af, global af into some kind of p-value
+          # turn predicted deleteriousness into a score
+
+      # report the values for the best-scoring transcript for this gene
+
+      # combine all reported scores into a single score
 
   def go_tx(self):
     # for every enst
@@ -805,19 +829,12 @@ class AnalyzeTrio():
             "INSERT INTO tx_mendel VALUES ('%s', '%s', '%s', %s, %s)" %
             (enst, test, chrom, pos1, pos2))
 
-# FIXME: THIS CODE CANT WORK AS IS
-#            # nonsyn muts in child but not parents
-#            mother_nonsyn, father_nonsyn, child_nonsyn = \
-#                [self.non_synonymous_tx(enst, stripped_sample = self.stripped_pedigree[x]) for x in ("mother", "father", "child")]
-#
-#            child_diffs = set(sum(child_nonsyn, [])).difference(sum(mother_nonsyn, []) + sum(father_nonsyn, []))
-# FIXME
-
   def go_variant(self):
     # load local allele frequencies
     local_af = self.af_from_vcf(self.vcf_file)
 
     # for every variant
+    s_time = time.time()
     processed = 0
 
     for variant in self.variants():
@@ -883,10 +900,12 @@ class AnalyzeTrio():
             "variant_id = '%s' AND allele = '%s'" % 
             (local_seq_af, global_seq_af, variant["variant_id"], seq))
 
-        processed += 1
+      processed += 1
 
-        if processed % 100 == 0:
-          sys.stderr.write("\rprocessed %s" % processed)
+      if processed % 100 == 0:
+        self.conn.commit()
+        sys.stderr.write("\rprocessed %s @ %.02f/s" %
+          (processed, processed / (time.time() - s_time)))
 
     sys.stderr.write("\n")
     self.conn.commit()
@@ -899,8 +918,3 @@ a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 "exomes_49.vcf",
                 "20130918_ensGene.tab", "20130918_ensemblToGeneName.tab",
                 "human-protein.aliases.v9.05.txt", "human-protein.links.v9.05.txt")
-
-#print a.non_synonymous("IL23R", "jp-scid7a")
-#print a.mendelian_filter(a._mf_compound_het_denovo, "chr1", 1000000, 2000000, k=2)
-#print a.mendelian_filter(a._mf_recessive, "chr1", 1000000, 2000000)
-#print a.mendelian_filter(a._mf_denovo_dominant, "chr1", 1000000, 2000000)
