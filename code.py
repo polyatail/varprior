@@ -8,6 +8,7 @@ import sqlite3
 from sqlite3 import OperationalError, DatabaseError
 import numpy
 import scipy
+import scipy.stats
 import time
 import itertools
 import sys
@@ -676,6 +677,7 @@ class AnalyzeTrio():
     return gene_graph
 
   def mk_subgraph(self):
+    # return subgraph induced by top genes and their first-degree neighbors
     neighbors = list(itertools.chain(*[self.gene_graph.neighbors(x) for x in self.top_genes]))
     subgraph = self.gene_graph.subgraph(neighbors + self.top_genes)
 
@@ -784,21 +786,23 @@ rel:  %s
   def score_gene_percentile(self, gene_name):
     # edge case: one of top genes
     if gene_name in self.top_genes:
-      return 1
+      return (1, 1)
 
     assert self.conn, self.c
 
     try:
       self.net_conn_hist
-    except NameError:
-      self.net_conn_hist = numpy.array([x["net_conn_score"] for x in \
-        self.c.execute("SELECT net_conn_score FROM gene_tests").fetchall()])
+    except AttributeError:
+      self.net_conn_hist = numpy.array([x[0] for x in \
+        self.c.execute("SELECT net_conn_score FROM gene_tests").fetchall() if \
+        x[0] != -1])
 
     try:
       self.net_rel_hist
-    except NameError:
-      self.net_rel_hist = numpy.array([x["net_rel_score"] for x in \
-        self.c.execute("SELECT net_rel_score FROM gene_tests").fetchall()])
+    except AttributeError:
+      self.net_rel_hist = numpy.array([x[0] for x in \
+        self.c.execute("SELECT net_rel_score FROM gene_tests").fetchall() if \
+        x[0] != -1])
 
     net_conn_score, net_rel_score = self.c.execute(
       "SELECT net_conn_score, net_rel_score FROM gene_tests WHERE " \
@@ -807,10 +811,10 @@ rel:  %s
     # edge case: not in network
     if net_conn_score == -1 or \
        net_rel_score == -1:
-      return 0
+      return (0, 0)
     else:
-      return scipy.stats.percentileofscore(self.net_conn_hist, net_conn_score),
-             scipy.stats.percentileofscore(self.net_rel_hist, net_rel_score)
+      return (scipy.stats.percentileofscore(self.net_conn_hist, net_conn_score) / 100.0,
+              scipy.stats.percentileofscore(self.net_rel_hist, net_rel_score) / 100.0)
 
   ##
   ## STATISTICS METHODS
@@ -838,7 +842,7 @@ rel:  %s
 
   def go_gene(self):
     # raw scores for network placement
-    self.score_all_genes()
+#    self.score_all_genes(self.mk_subgraph())
 
     # for every gene
     for gene in self.gene_names():
@@ -860,9 +864,13 @@ rel:  %s
 
       # combine all reported scores into a single score
 
+    self.conn.commit()
+
   def go_tx(self):
     # for every enst
     for enst in self.tx_names():
+      print enst
+
       # fetch tx data
       enst_data = self.fetch_tx(enst)
       chrom, txStart, txEnd = [enst_data[x] for x in ("chrom", "txStart", "txEnd")]
@@ -884,6 +892,8 @@ rel:  %s
           self.c.execute(
             "INSERT INTO tx_mendel VALUES ('%s', '%s', '%s', %s, %s)" %
             (enst, test, chrom, pos1, pos2))
+
+    self.conn.commit()
 
   def go_variant(self):
     # load local allele frequencies
