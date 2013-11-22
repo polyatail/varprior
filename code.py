@@ -26,7 +26,7 @@ class AnalyzeTrio():
                     "network": 1,
                     "global_af": 1,
                     "local_af": 1}
-    self.network_score_cutoff = 700
+    self.network_score_cutoff = 677
     self.top_genes = ["ADAMTS8", "AIRE", "AK2", "ATM", "BTK", "CD247", "CD3D",
                       "CD3G", "CD40LG", "CD8A", "CD8B", "CHD7", "CIITA",
                       "CORO1A", "CYBB", "DCLRE1C", "DKC1", "DOCK8", "FOXN1",
@@ -129,8 +129,8 @@ class AnalyzeTrio():
       c.execute("CREATE TABLE enst_to_gene_name (enst text, gene_name text)")
       c.execute("CREATE TABLE variants (variant_id integer primary key, chrom text, pos int, %s)" %
                 ", ".join(["%s text" % x.replace("-", "") for x in self.sample_names]))
-      c.execute("CREATE TABLE gene_tests (gene_name text, network_score float, " \
-                "network_score_percentile float)")
+      c.execute("CREATE TABLE gene_tests (gene_name text, net_conn_score float, " \
+                "net_conn_perc float, net_rel_score float, net_rel_perc float)")
       c.execute("CREATE TABLE tx_mendel (enst text, model text, chrom test, " \
                 "pos1 int, pos2 int)")
       c.execute("CREATE TABLE variant_tests (variant_id int, allele text, " \
@@ -152,6 +152,7 @@ class AnalyzeTrio():
       c.execute("CREATE INDEX IF NOT EXISTS ensp_index ON ensp_to_enst(ensp);")
       c.execute("CREATE INDEX IF NOT EXISTS enst_index ON enst_to_gene_name(enst);")
       c.execute("CREATE INDEX IF NOT EXISTS gene_name_index ON enst_to_gene_name(gene_name);")
+      c.execute("CREATE INDEX IF NOT EXISTS gene_name_index2 ON gene_tests(gene_name);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index ON variants(variant_id);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index2 ON variant_tests(variant_id);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index3 ON variant_nonsyn(variant_id);")
@@ -674,6 +675,12 @@ class AnalyzeTrio():
 
     return gene_graph
 
+  def mk_subgraph(self):
+    neighbors = list(itertools.chain(*[self.gene_graph.neighbors(x) for x in self.top_genes]))
+    subgraph = self.gene_graph.subgraph(neighbors + self.top_genes)
+
+    return subgraph
+
   @staticmethod
   def find_connected_genes(node_list, max_depth, graph):
     # find genes within n connections of given gene
@@ -712,50 +719,98 @@ class AnalyzeTrio():
     plt.axis("off")
     plt.show()
 
-  def score_all_genes(self):
+  def score_all_genes(self, graph):
+    # connectivity score, defines how central in the network a gene is
+    # relative score, defines how close to the nearest puck gene a gene is
     gene_names = self.gene_names()
 
     for gene in gene_names:
-      # shortest path by weight to each of top genes
       all_weights = []
-      no_paths = 0
+      no_paths = []
+  
+      if gene not in graph:
+        connectivity = -1
+        relative = -1
+      else:
+        # shortest path by weight to each of top genes
+        for top_gene in self.top_genes:
+          try:
+            path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
+          except (NetworkXNoPath, KeyError):
+            no_paths.append(top_gene)
+            continue
 
-      for top_gene in self.top_genes:
-        try:
-          path = networkx.astar_path(self.gene_graph, gene, top_gene, weight="weight")
-        except NetworkXNoPath:
-          no_paths += 1
-          continue
+          weights = []
+ 
+          for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
+            # pseudocount of 1 to prevent log(nada) == log(1)
+            weights.append(graph[node_from][node_to]["weight"] + 1)
 
-        for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
-          all_weights.append(self.gene_graph[node_from][node_to]["weight"])
+          all_weights.append((top_gene, weights))
 
-      score = sum([math.log(x) for x in all_weights]) / \
-              (len(self.top_genes) - no_paths + 1) ** 0.5
+        all_weights_only = [x[1] for x in all_weights]
 
-      print gene, score, no_paths
+        # connectivity score
+        combined_weights = sum(all_weights_only, [])
+        conn_raw_score = sum([math.log(x) for x in combined_weights]) 
+        connectivity = conn_raw_score * (len(combined_weights) + 10 * len(no_paths)) ** 0.5
+
+        # relative score
+        nearest_gene, shortest_path = sorted(all_weights, key=lambda x: len(x[1]))[0]
+        rel_raw_score = sum([math.log(x) for x in shortest_path])
+        relative = rel_raw_score * len(shortest_path) ** 0.5
+
+      if connectivity != -1:
+        print """
+gene: %s
+conn: %s
+    conn_raw: %s
+    steps:    %s
+    no_path:  %s
+rel:  %s
+    rel_raw:  %s
+    steps:    %s
+    topgene:  %s
+    path:     %s
+""" % (gene, connectivity, conn_raw_score, len(combined_weights), no_paths,
+       relative, rel_raw_score, len(shortest_path), nearest_gene, shortest_path)
 
       self.c.execute(
-        "UPDATE gene_tests SET network_score = '%s' WHERE gene_name = '%s'" % (score, gene))
+        "UPDATE gene_tests SET net_conn_score = '%s', net_rel_score = '%s'" \
+        " WHERE gene_name = '%s'" % (connectivity, relative, gene))
 
     self.conn.commit()
  
   def score_gene_percentile(self, gene_name):
+    # edge case: one of top genes
     if gene_name in self.top_genes:
       return 1
 
     assert self.conn, self.c
 
     try:
-      self.network_score_hist
+      self.net_conn_hist
     except NameError:
-      self.network_score_hist = numpy.array([x["network_score"] for x in \
-        self.c.execute("SELECT network_score FROM gene_tests").fetchall()])
+      self.net_conn_hist = numpy.array([x["net_conn_score"] for x in \
+        self.c.execute("SELECT net_conn_score FROM gene_tests").fetchall()])
 
-    score = self.c.execute(
-      "SELECT network_score FROM gene_tests WHERE gene_name = '%s'" % gene_name).fetchone()[0]
+    try:
+      self.net_rel_hist
+    except NameError:
+      self.net_rel_hist = numpy.array([x["net_rel_score"] for x in \
+        self.c.execute("SELECT net_rel_score FROM gene_tests").fetchall()])
 
-    return scipy.stats.percentileofscore(self.network_score_hist, score)
+    net_conn_score, net_rel_score = self.c.execute(
+      "SELECT net_conn_score, net_rel_score FROM gene_tests WHERE " \
+      "gene_name = '%s'" % gene_name).fetchone()
+
+    # edge case: not in network
+    if net_conn_score == -1 or \
+       net_rel_score == -1:
+      return 0
+    else:
+      return scipy.stats.percentileofscore(self.net_conn_hist, net_conn_score),
+             scipy.stats.percentileofscore(self.net_rel_hist, net_rel_score)
 
   ##
   ## STATISTICS METHODS
@@ -788,10 +843,11 @@ class AnalyzeTrio():
     # for every gene
     for gene in self.gene_names():
       # network gene placement score
-      score = self.score_gene_percentile(gene)
+      net_conn_perc, net_rel_perc = self.score_gene_percentile(gene)
 
       self.c.execute(
-        "UPDATE gene_tests SET network_score_percentile = '%s' WHERE gene_name = '%s'" % (score, gene)) 
+        "UPDATE gene_tests SET net_conn_perc = '%s', net_rel_perc = '%s' WHERE " \
+        "gene_name = '%s'" % (net_conn_perc, net_rel_perc, gene)) 
 
       # for every transcript that belongs to this gene
         # turn mendelian inheritance into some kind of p-value
@@ -914,7 +970,7 @@ a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
                 "varprior.db",
                 "varprior.gpickle",
-                "hg19.fa",
-                "exomes_49.vcf",
-                "20130918_ensGene.tab", "20130918_ensemblToGeneName.tab",
-                "human-protein.aliases.v9.05.txt", "human-protein.links.v9.05.txt")
+                "data/hg19.fa",
+                "data/exomes_49.vcf",
+                "data/20130918_ensGene.tab", "data/20130918_ensemblToGeneName.tab",
+                "data/human-protein.aliases.v9.05.txt", "data/human-protein.links.v9.05.txt")
