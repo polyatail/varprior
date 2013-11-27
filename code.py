@@ -356,7 +356,7 @@ class AnalyzeTrio():
           [pos[i][self.stripped_pedigree[x]].split("/") for x in \
           ("mother", "father", "child")]
 
-        variant_ids.append(pos["variant_id"])
+        variant_ids.append(pos[i]["variant_id"])
 
         # if no variant reported, continue
         if "." in mother[i] or \
@@ -364,10 +364,10 @@ class AnalyzeTrio():
            "." in child[i]:
           break
       else:
-        result = m_filter(mother, father, child):
+        result = m_filter(mother, father, child)
 
         if result[0]:
-          hits.append(variant_ids, result[1])
+          hits.append((variant_ids, result[1]))
 
     return hits
 
@@ -741,7 +741,7 @@ class AnalyzeTrio():
     for gene in gene_names:
       all_weights = []
       no_paths = []
-  
+ 
       if gene not in graph:
         connectivity = -1
         relative = -1
