@@ -5,7 +5,6 @@ import pyfasta
 from Bio.Seq import Seq
 from Bio.Data.CodonTable import TranslationError
 import sqlite3
-from sqlite3 import OperationalError, DatabaseError
 import numpy
 import scipy
 import scipy.stats
@@ -111,7 +110,7 @@ class AnalyzeTrio():
           raise ValueError(
             "Corrupt index. Expected %s records, found %s" % (record_count,
                                                               records_found))
-      except (OperationalError, DatabaseError), error:
+      except (sqlite3.OperationalError, sqlite3.DatabaseError), error:
         raise ValueError("Problem with SQLite database: %s" % error)
 
       new_db = False
@@ -854,9 +853,28 @@ rel:  %s
         "gene_name = '%s'" % (net_conn_perc, net_rel_perc, gene)) 
 
       # for every transcript that belongs to this gene
-        # turn mendelian inheritance into some kind of p-value
+      gene_tx = self.c.execute(
+        "SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene).fetchall()
 
-        # for every non-synonymous variant in this transcript
+      for tx in gene_tx:
+        # for every inheritance model in this transcript
+        tx_models = self.c.execute(
+          "SELECT * FROM tx_mendel WHERE enst = '%s'" % tx).fetchall()
+
+        for model in tx_models:
+          # turn mendelian inheritance into some kind of p-value
+
+          for pos_id in ("pos1", "pos2"):
+            # get variant id
+            self.c.execute(
+              "SELECT variant_id FROM variants WHERE chrom = '%s' AND pos = '%s" % \
+              (model["chrom"], model[pos_id]))
+
+            # get af
+#            self.c.execute(
+#              "SELECT
+          # for every non-synonymous variant in this transcript
+          
           # turn local af, global af into some kind of p-value
           # turn predicted deleteriousness into a score
 
