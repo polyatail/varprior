@@ -131,8 +131,8 @@ class AnalyzeTrio():
                 ", ".join(["%s text" % x.replace("-", "") for x in self.sample_names]))
       c.execute("CREATE TABLE gene_tests (gene_name text, net_conn_score float, " \
                 "net_conn_perc float, net_rel_score float, net_rel_perc float)")
-      c.execute("CREATE TABLE tx_mendel (enst text, model text, chrom test, " \
-                "pos1 int, pos2 int)")
+      c.execute("CREATE TABLE tx_mendel (enst text, model text, varid1 int, " \
+                "allele1 text, varid2 int, allele2 text)")
       c.execute("CREATE TABLE variant_tests (variant_id int, allele text, " \
                 "local_af float, global_af float)")
       c.execute("CREATE TABLE variant_nonsyn (variant_id int, allele text, " \
@@ -349,11 +349,14 @@ class AnalyzeTrio():
 
     for pos in itertools.combinations(pos_in_region, k):
       mother, father, child = {}, {}, {}
+      variant_ids = []
 
       for i in range(k):
         mother[i], father[i], child[i] = \
           [pos[i][self.stripped_pedigree[x]].split("/") for x in \
           ("mother", "father", "child")]
+
+        variant_ids.append(pos["variant_id"])
 
         # if no variant reported, continue
         if "." in mother[i] or \
@@ -361,8 +364,10 @@ class AnalyzeTrio():
            "." in child[i]:
           break
       else:
-        if m_filter(mother, father, child):
-          hits.append(tuple([chrom] + [start + x["pos"] for x in pos]))
+        result = m_filter(mother, father, child):
+
+        if result[0]:
+          hits.append(variant_ids, result[1])
 
     return hits
 
@@ -372,16 +377,22 @@ class AnalyzeTrio():
     if len(set(child[0])) == 1 and \
        len(set(mother[0])) == 2 and \
        len(set(father[0])) == 2:
-      return True
+      return (True, (child[0][0]))
+
+    return (False, None)
 
   @staticmethod
   def _mf_denovo_dominant(mother, father, child):
     # one or both alleles in child must not be in either parent
     if (child[0][0] not in mother[0] and \
-        child[0][0] not in father[0]) or \
-       (child[0][1] not in mother[0] and \
+        child[0][0] not in father[0]):
+      return (True, (child[0][0]))
+
+    if (child[0][1] not in mother[0] and \
         child[0][1] not in father[0]):
-      return True
+      return (True, child[0][1])
+
+    return (False, None)
 
   @staticmethod
   def _mf_compound_het_denovo(mother, father, child):
@@ -407,7 +418,7 @@ class AnalyzeTrio():
     # 1. child heterozygous at both loci
     if child[0][0] == child[0][1] or \
        child[1][0] == child[1][1]:
-      return False
+      return (False, None)
     
     # there are four hypotheses. each position has two alleles,
     # and any combination of the two alleles at each position
@@ -440,7 +451,9 @@ class AnalyzeTrio():
           child2 in father[1]):
         continue
 
-      return True
+      return (True, (child1, child2))
+
+    return (False, None)
 
   ##
   ## GENOME/CODING POTENTIAL METHODS
@@ -841,7 +854,7 @@ rel:  %s
 
   def go_gene(self):
     # raw scores for network placement
-#    self.score_all_genes(self.mk_subgraph())
+    self.score_all_genes(self.mk_subgraph())
 
     # for every gene
     for gene in self.gene_names():
@@ -857,30 +870,46 @@ rel:  %s
         "SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene).fetchall()
 
       for tx in gene_tx:
+        # fetch non-synonymous variants for this tx
+        tx_nonsyn = self.c.execute(
+          "SELECT * FROM variant_nonsyn WHERE enst = '%s'" % tx).fetchall()
+
+        var_to_mut = {}
+
+        for row in tx_nonsyn:
+          var_to_mut[(row["variant_id"], row["allele"])] = row["mut"]
+
         # for every inheritance model in this transcript
         tx_models = self.c.execute(
           "SELECT * FROM tx_mendel WHERE enst = '%s'" % tx).fetchall()
 
         for model in tx_models:
-          # turn mendelian inheritance into some kind of p-value
+          m = {0: {"varid": model["varid1"],
+                   "allele": model["allele1"]},
+               1: {"varid": model["varid2"],
+                   "allele": model["allele2"]}}
 
-          for pos_id in ("pos1", "pos2"):
-            # get variant id
-            self.c.execute(
-              "SELECT variant_id FROM variants WHERE chrom = '%s' AND pos = '%s" % \
-              (model["chrom"], model[pos_id]))
+          # model -> p-value
 
-            # get af
-#            self.c.execute(
-#              "SELECT
-          # for every non-synonymous variant in this transcript
-          
-          # turn local af, global af into some kind of p-value
-          # turn predicted deleteriousness into a score
+          # allele frequency and non-synonymous
+          for i in m:
+            m[i]["l_af"], m[i]["g_af"] = self.c.execute(
+              "SELECT local_af, global_af FROM variant_tests WHERE " \
+              "variant_id = '%s' AND allele = '%s'" %
+              (m[i]["varid"], m[i]["allele"])).fetchone()
 
-      # report the values for the best-scoring transcript for this gene
+            m[i]["nonsyn"] = var_to_mut[(m[i]["varid"], m[i]["allele"])]
 
-      # combine all reported scores into a single score
+            # af -> p-value
+            # non-syn -> p-value
+
+          # combine model params -> pvalue
+
+        # take best-scoring model for this tx
+
+      # take best-scoring tx for this gene
+
+      # combine with gene network placement score -> final gene score
 
     self.conn.commit()
 
@@ -904,12 +933,19 @@ rel:  %s
       for test, results in zip(("comphet", "recessive", "dominant"), \
                                (comphet, recessive, dominant)):
         for result in results:
-          pos1 = result[1]
-          pos2 = "NULL" if len(result) == 2 else result[2]
-    
+          varid1 = result[0][0]
+          allele1 = result[1][0]
+
+          if len(result[0]) == 2:
+            varid2 = result[0][1]
+            allele2 = result[1][1]
+          else:
+            varid2 = "NULL"
+            allele2 = "NULL"
+ 
           self.c.execute(
-            "INSERT INTO tx_mendel VALUES ('%s', '%s', '%s', %s, %s)" %
-            (enst, test, chrom, pos1, pos2))
+            "INSERT INTO tx_mendel VALUES ('%s', '%s', %s, '%s', %s, '%s')" %
+            (enst, test, varid1, allele1, varid2, allele2))
 
     self.conn.commit()
 
