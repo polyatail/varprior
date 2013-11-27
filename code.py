@@ -825,8 +825,8 @@ rel:  %s
        net_rel_score == -1:
       return (0, 0)
     else:
-      return (scipy.stats.percentileofscore(self.net_conn_hist, net_conn_score) / 100.0,
-              scipy.stats.percentileofscore(self.net_rel_hist, net_rel_score) / 100.0)
+      return (1 - scipy.stats.percentileofscore(self.net_conn_hist, net_conn_score) / 100.0,
+              1 - scipy.stats.percentileofscore(self.net_rel_hist, net_rel_score) / 100.0)
 
   ##
   ## STATISTICS METHODS
