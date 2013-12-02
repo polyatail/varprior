@@ -201,6 +201,8 @@ class AnalyzeTrio():
     self.conn.commit()
 
   def load_trio_vcf(self, vcf_file):
+    #TODO: load QVs from VCF
+    #TODO: add function to import QVs into db post hoc
     assert self.conn, self.c
 
     variant_count = int(self.c.execute(
@@ -889,7 +891,9 @@ rel:  %s
                1: {"varid": model["varid2"],
                    "allele": model["allele2"]}}
 
-          # model -> p-value
+          #TODO: model -> p-value -- just newell-ikeda?
+
+          #TODO: add score for VCF QVs
 
           # allele frequency and non-synonymous
           for i in m:
@@ -900,16 +904,16 @@ rel:  %s
 
             m[i]["nonsyn"] = var_to_mut[(m[i]["varid"], m[i]["allele"])]
 
-            # af -> p-value
-            # non-syn -> p-value
+            #TODO: af -> p-value
+            #TODO: non-syn -> p-value
 
-          # combine model params -> pvalue
+          #TODO: combine model params -> pvalue
 
-        # take best-scoring model for this tx
+        #TODO: take best-scoring model for this tx
 
-      # take best-scoring tx for this gene
+      #TODO: take best-scoring tx for this gene
 
-      # combine with gene network placement score -> final gene score
+      #TODO: combine with gene network placement score -> final gene score
 
     self.conn.commit()
 
