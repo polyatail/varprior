@@ -129,8 +129,8 @@ class AnalyzeTrio():
       c.execute("CREATE TABLE enst_to_gene_name (enst text, gene_name text)")
       c.execute("CREATE TABLE variants (variant_id integer primary key, chrom text, pos int, %s)" %
                 ", ".join(["%s text" % x.replace("-", "") for x in self.sample_names]))
-      c.execute("CREATE TABLE gene_tests (gene_name text, net_conn_score float, " \
-                "net_conn_perc float, net_rel_score float, net_rel_perc float)")
+      c.execute("CREATE TABLE gene_tests (gene_name text, net_cent_score float, " \
+                "net_cent_perc float, net_nn_score float, net_nn_perc float)")
       c.execute("CREATE TABLE tx_mendel (enst text, model text, varid1 int, " \
                 "allele1 text, varid2 int, allele2 text)")
       c.execute("CREATE TABLE variant_tests (variant_id int, allele text, " \
@@ -736,13 +736,13 @@ class AnalyzeTrio():
     plt.show()
 
   def score_all_genes(self, graph):
-    # connectivity score, defines how central in the network a gene is
-    # relative score, defines how close to the nearest puck gene a gene is
+    # two scores:
+    # harmonic centrality defines how well connected a gene is all puck genes
+    # nearest-neighobr defines how close a gene is to its nearest puck gene
     gene_names = self.gene_names()
 
     for gene in gene_names:
-      all_weights = []
-      no_paths = []
+      dist_to_top_genes = []
  
       if gene not in graph:
         connectivity = -1
@@ -753,47 +753,29 @@ class AnalyzeTrio():
           try:
             path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
           except (NetworkXNoPath, KeyError):
-            no_paths.append(top_gene)
             continue
 
           weights = []
  
           for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
-            # pseudocount of 1 to prevent log(nada) == log(1)
-            weights.append(graph[node_from][node_to]["weight"] + 1)
+            # convert back to original STRING scores
+            weights.append(1000 - graph[node_from][node_to]["weight"])
 
-          all_weights.append((top_gene, weights))
+          dist_to_top_genes.append(float(sum(weights)))
 
-        all_weights_only = [x[1] for x in all_weights]
-
-        # connectivity score
-        combined_weights = sum(all_weights_only, [])
-        conn_raw_score = sum([math.log(x) for x in combined_weights]) 
-        connectivity = conn_raw_score * (len(combined_weights) + 10 * len(no_paths)) ** 0.5
-
-        # relative score
-        nearest_gene, shortest_path = sorted(all_weights, key=lambda x: len(x[1]))[0]
-        rel_raw_score = sum([math.log(x) for x in shortest_path])
-        relative = rel_raw_score * len(shortest_path) ** 0.5
+        harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
+        nearest_neighbor = sorted(dist_to_top_genes)[-1]
 
       if connectivity != -1:
         print """
 gene: %s
-conn: %s
-    conn_raw: %s
-    steps:    %s
-    no_path:  %s
-rel:  %s
-    rel_raw:  %s
-    steps:    %s
-    topgene:  %s
-    path:     %s
-""" % (gene, connectivity, conn_raw_score, len(combined_weights), no_paths,
-       relative, rel_raw_score, len(shortest_path), nearest_gene, shortest_path)
+cent: %s
+nn:   %s
+""" % (gene, harmonic_centrality, nearest_neighbor)
 
       self.c.execute(
-        "UPDATE gene_tests SET net_conn_score = '%s', net_rel_score = '%s'" \
-        " WHERE gene_name = '%s'" % (connectivity, relative, gene))
+        "UPDATE gene_tests SET net_cent_score = '%s', net_nn_score = '%s'" \
+        " WHERE gene_name = '%s'" % (harmonic_centrality, nearest_neighbor, gene))
 
     self.conn.commit()
  
@@ -808,18 +790,18 @@ rel:  %s
       self.net_conn_hist
     except AttributeError:
       self.net_conn_hist = numpy.array([x[0] for x in \
-        self.c.execute("SELECT net_conn_score FROM gene_tests").fetchall() if \
+        self.c.execute("SELECT net_cent_score FROM gene_tests").fetchall() if \
         x[0] != -1])
 
     try:
       self.net_rel_hist
     except AttributeError:
       self.net_rel_hist = numpy.array([x[0] for x in \
-        self.c.execute("SELECT net_rel_score FROM gene_tests").fetchall() if \
+        self.c.execute("SELECT net_nn_score FROM gene_tests").fetchall() if \
         x[0] != -1])
 
-    net_conn_score, net_rel_score = self.c.execute(
-      "SELECT net_conn_score, net_rel_score FROM gene_tests WHERE " \
+    net_cent_score, net_nn_score = self.c.execute(
+      "SELECT net_cent_score, net_nn_score FROM gene_tests WHERE " \
       "gene_name = '%s'" % gene_name).fetchone()
 
     # edge case: not in network
@@ -827,8 +809,8 @@ rel:  %s
        net_rel_score == -1:
       return (0, 0)
     else:
-      return (1 - scipy.stats.percentileofscore(self.net_conn_hist, net_conn_score) / 100.0,
-              1 - scipy.stats.percentileofscore(self.net_rel_hist, net_rel_score) / 100.0)
+      return (scipy.stats.percentileofscore(self.net_conn_hist, net_conn_score) / 100.0,
+              scipy.stats.percentileofscore(self.net_rel_hist, net_rel_score) / 100.0)
 
   ##
   ## STATISTICS METHODS
