@@ -744,12 +744,16 @@ class AnalyzeTrio():
     for gene in gene_names:
       dist_to_top_genes = []
  
-      if gene not in graph:
-        connectivity = -1
-        relative = -1
+      if gene not in graph or \
+         graph.degree(gene) == 0:
+        harmonic_centrality = -1
+        nearest_neighbor = -1
       else:
         # shortest path by weight to each of top genes
         for top_gene in self.top_genes:
+          if top_gene == gene:
+            continue
+
           try:
             path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
           except (NetworkXNoPath, KeyError):
@@ -758,15 +762,13 @@ class AnalyzeTrio():
           weights = []
  
           for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
-            # convert back to original STRING scores
-            weights.append(1000 - graph[node_from][node_to]["weight"])
+            weights.append(graph[node_from][node_to]["weight"])
 
           dist_to_top_genes.append(float(sum(weights)))
 
         harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
-        nearest_neighbor = sorted(dist_to_top_genes)[-1]
+        nearest_neighbor = sorted(dist_to_top_genes)[0]
 
-      if connectivity != -1:
         print """
 gene: %s
 cent: %s
@@ -787,16 +789,16 @@ nn:   %s
     assert self.conn, self.c
 
     try:
-      self.net_conn_hist
+      self.net_cent_hist
     except AttributeError:
-      self.net_conn_hist = numpy.array([x[0] for x in \
+      self.net_cent_hist = numpy.array([x[0] for x in \
         self.c.execute("SELECT net_cent_score FROM gene_tests").fetchall() if \
         x[0] != -1])
 
     try:
-      self.net_rel_hist
+      self.net_nn_hist
     except AttributeError:
-      self.net_rel_hist = numpy.array([x[0] for x in \
+      self.net_nn_hist = numpy.array([x[0] for x in \
         self.c.execute("SELECT net_nn_score FROM gene_tests").fetchall() if \
         x[0] != -1])
 
@@ -809,8 +811,8 @@ nn:   %s
        net_rel_score == -1:
       return (0, 0)
     else:
-      return (scipy.stats.percentileofscore(self.net_conn_hist, net_conn_score) / 100.0,
-              scipy.stats.percentileofscore(self.net_rel_hist, net_rel_score) / 100.0)
+      return (scipy.stats.percentileofscore(self.net_cent_hist, net_cent_score) / 100.0,
+              1 - scipy.stats.percentileofscore(self.net_nn_hist, net_nn_score) / 100.0)
 
   ##
   ## STATISTICS METHODS
