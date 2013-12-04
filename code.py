@@ -1009,7 +1009,7 @@ class AnalyzeTrio():
                                           variant["pos"],
                                           variant["pos"] + 1)
 
-      for seq in nonref_seqs:
+      for seq in all_seqs:
         # local
         try:
           local_seq_af = local_af[variant["chrom"]][variant["pos"]][seq]
