@@ -36,7 +36,7 @@ class AnalyzeTrio():
                       "PTPRC", "RAG1", "RAG2", "RFXANK", "SH2D1A", "STAT5B",
                       "STIM1", "TAP1", "TAP2", "TAPBP", "TBX1", "WAS", "XIAP",
                       "ZAP70", "ZBTB1"]
-    self.global_vcf = "AFR.2of4intersection_allele_freq" \
+    self.global_vcf = "data/AFR.2of4intersection_allele_freq" \
                       ".20100804.genotypes.vcf.gz"
 
     self.sample_names = sample_names
@@ -600,8 +600,11 @@ class AnalyzeTrio():
     
     while tabix.poll() == None:
       time.sleep(0.01)
-    
-    af_table = self.af_from_vcf(tabix_out.name)
+
+    if os.stat(tabix_out.name).st_size == 0:
+      af_table = {}
+    else:
+      af_table = self.af_from_vcf(tabix_out.name)
 
     os.unlink(tabix_out.name)
 
