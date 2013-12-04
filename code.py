@@ -23,9 +23,10 @@ class AnalyzeTrio():
                string_links_file = None):
     self.weights = {"mendelian": 1,
                     "non-synonymous": 1,
-                    "network": 1,
                     "global_af": 1,
-                    "local_af": 1}
+                    "local_af": 1,
+                    "net_cent": 1,
+                    "net_nn": 1}
     self.network_score_cutoff = 677
     self.top_genes = ["ADAMTS8", "AIRE", "AK2", "ATM", "BTK", "CD247", "CD3D",
                       "CD3G", "CD40LG", "CD8A", "CD8B", "CHD7", "CIITA",
@@ -769,11 +770,7 @@ class AnalyzeTrio():
         harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
         nearest_neighbor = sorted(dist_to_top_genes)[0]
 
-        print """
-gene: %s
-cent: %s
-nn:   %s
-""" % (gene, harmonic_centrality, nearest_neighbor)
+        print "gene: %s\ncent: %s\nnn:   %s" % (gene, harmonic_centrality, nearest_neighbor)
 
       self.c.execute(
         "UPDATE gene_tests SET net_cent_score = '%s', net_nn_score = '%s'" \
@@ -807,8 +804,8 @@ nn:   %s
       "gene_name = '%s'" % gene_name).fetchone()
 
     # edge case: not in network
-    if net_conn_score == -1 or \
-       net_rel_score == -1:
+    if net_cent_score == -1 or \
+       net_nn_score == -1:
       return (0, 0)
     else:
       return (scipy.stats.percentileofscore(self.net_cent_hist, net_cent_score) / 100.0,
@@ -824,7 +821,7 @@ nn:   %s
     return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / \
                          scipy.misc.factorial(k - 1, exact=True))
 
-  def mcda_product(self, score_dict):
+  def wpm(self, score_dict):
     # from http://en.wikipedia.org/wiki/Weighted_product_model
     # return weighted product score, combining scores with self.weights
     total_score = 1
@@ -834,28 +831,49 @@ nn:   %s
 
     return total_score
 
+  def wsm(self, score_dict):
+    # from http://en.wikipedia.org/wiki/Weighted_sum_model
+    # return weighted sum score, combining scores with self.weights
+    total_score = []
+
+    for k, v in score_dict:
+        total_score.append(float(v) * self.weights[k])
+
+    return sum(total_score)
+
   ##
   ## RUN THE ANALYSIS
   ##
 
   def go_gene(self):
     # raw scores for network placement
-    self.score_all_genes(self.mk_subgraph())
+    #self.score_all_genes(self.mk_subgraph())
 
     # for every gene
     for gene in self.gene_names():
       # network gene placement score
-      net_conn_perc, net_rel_perc = self.score_gene_percentile(gene)
+      net_cent_perc, net_nn_perc = self.score_gene_percentile(gene)
 
       self.c.execute(
-        "UPDATE gene_tests SET net_conn_perc = '%s', net_rel_perc = '%s' WHERE " \
-        "gene_name = '%s'" % (net_conn_perc, net_rel_perc, gene)) 
+        "UPDATE gene_tests SET net_cent_perc = '%s', net_nn_perc = '%s' WHERE " \
+        "gene_name = '%s'" % (net_cent_perc, net_nn_perc, gene)) 
 
       # for every transcript that belongs to this gene
-      gene_tx = self.c.execute(
-        "SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene).fetchall()
+      gene_tx = [x["enst"] for x in self.c.execute(
+        "SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene).fetchall()]
+
+      print "gene: %s\n  cent: %s\n  nn:   %s" % (gene, net_cent_perc, net_nn_perc)
 
       for tx in gene_tx:
+        print "    tx: %s" % tx
+
+        # fetch every inheritance model in this transcript
+        tx_models = self.c.execute(
+          "SELECT * FROM tx_mendel WHERE enst = '%s'" % tx).fetchall()
+
+        if len(tx_models) == 0:
+          continue
+
         # fetch non-synonymous variants for this tx
         tx_nonsyn = self.c.execute(
           "SELECT * FROM variant_nonsyn WHERE enst = '%s'" % tx).fetchall()
@@ -865,15 +883,16 @@ nn:   %s
         for row in tx_nonsyn:
           var_to_mut[(row["variant_id"], row["allele"])] = row["mut"]
 
-        # for every inheritance model in this transcript
-        tx_models = self.c.execute(
-          "SELECT * FROM tx_mendel WHERE enst = '%s'" % tx).fetchall()
-
+        # iterate through all the models
         for model in tx_models:
+          print "      model: %s,%s,%s" % (model["model"], model["varid1"], model["varid2"])
+
           m = {0: {"varid": model["varid1"],
-                   "allele": model["allele1"]},
-               1: {"varid": model["varid2"],
-                   "allele": model["allele2"]}}
+                   "allele": model["allele1"]}}
+
+          if model["varid2"]:
+            m[1] = {"varid": model["varid2"],
+                    "allele": model["allele2"]}
 
           #TODO: model -> p-value -- just newell-ikeda?
 
@@ -881,12 +900,20 @@ nn:   %s
 
           # allele frequency and non-synonymous
           for i in m:
-            m[i]["l_af"], m[i]["g_af"] = self.c.execute(
-              "SELECT local_af, global_af FROM variant_tests WHERE " \
-              "variant_id = '%s' AND allele = '%s'" %
-              (m[i]["varid"], m[i]["allele"])).fetchone()
+            try:
+              m[i]["l_af"], m[i]["g_af"] = self.c.execute(
+                "SELECT local_af, global_af FROM variant_tests WHERE " \
+                "variant_id = '%s' AND allele = '%s'" %
+                (m[i]["varid"], m[i]["allele"])).fetchone()
+            except TypeError:
+              import pdb; pdb.set_trace()
 
-            m[i]["nonsyn"] = var_to_mut[(m[i]["varid"], m[i]["allele"])]
+            try:
+              m[i]["nonsyn"] = var_to_mut[(m[i]["varid"], m[i]["allele"])]
+            except KeyError:
+              m[i]["nonsyn"] = False
+
+          print "      m: %s" % m
 
             #TODO: af -> p-value
             #TODO: non-syn -> p-value
