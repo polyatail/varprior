@@ -158,6 +158,7 @@ class AnalyzeTrio():
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index ON variants(variant_id);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index2 ON variant_tests(variant_id);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index3 ON variant_nonsyn(variant_id);")
+      c.execute("CREATE INDEX IF NOT EXISTS allele_index ON variant_tests(allele);")
 
       new_db = True
 
@@ -480,7 +481,7 @@ class AnalyzeTrio():
 
     # examine each transcript isoform of this gene
     for enst in all_enst:
-      results[enst] = self.non_synonymous_enst(enst, stripped_sample, mut)
+      results[enst] = self.non_synonymous_tx(enst, stripped_sample, mut)
 
   def non_synonymous_tx(self, enst, stripped_sample = False, mut = False):
     # fetch exons
@@ -557,14 +558,16 @@ class AnalyzeTrio():
           sys.stderr.write("Transcript %s could not be translated\n" % enst)
           return ([], [])
     
-        allele1 = [(orig, pos, mut) for pos, (orig, mut) in \
-          enumerate(zip(orig_protein, mut_protein1)) if orig != mut]
-        allele2 = [(orig, pos, mut) for pos, (orig, mut) in \
-          enumerate(zip(orig_protein, mut_protein2)) if orig != mut]
+        allele1 = [(o, p, m) for p, (o, m) in \
+          enumerate(zip(orig_protein, mut_protein1)) if o != m]
+        allele2 = [(o, p, m) for p, (o, m) in \
+          enumerate(zip(orig_protein, mut_protein2)) if o != m]
 
         return (allele1, allele2)
     elif stripped_sample == False and mut:
-      if mut["seq"] != ".":
+      if mut["seq"] == ".":
+        return []
+      else:
         self.pyf_genome[chrom][mut["pos"]] = mut["seq"]
 
       mut_seq = []
@@ -579,8 +582,8 @@ class AnalyzeTrio():
         except TranslationError:
           sys.stderr.write("Transcript %s could not be translated\n" % enst)
 
-        diffs = [(orig, pos, mut) for pos, (orig, mut) in \
-          enumerate(zip(orig_protein, mut_protein)) if orig != mut]
+        diffs = [(o, p, m) for p, (o, m) in \
+          enumerate(zip(orig_protein, mut_protein)) if o != m]
 
         return diffs
     else:
@@ -592,7 +595,7 @@ class AnalyzeTrio():
 
   def tabix_af_in_region_native(self, vcf_file, chrom, start, end):
     tbx = pysam.Tabixfile(vcf_file)
-    lines = tbx.fetch(chrom.replace("chr", ""), start, end)
+    lines = tbx.fetch(int(chrom), int(start), int(end))
 
     all_af = {}
 
@@ -600,16 +603,21 @@ class AnalyzeTrio():
       l = l.strip().split("\t")
 
       alleles = [l[3]] + l[4].split(",")
-      af = dict([(x, 0) for x in alleles])
+      af = dict([(x, 0) for x in alleles if x != "."])
 
-      for indiv in l[9:]
-        af[alleles[indiv[0]]] += 1
-        af[alleles[indiv[2]]] += 1
+      for indiv in l[9:]:
+        try:
+          af[alleles[int(indiv[0])]] += 1
+        except ValueError:
+          pass
+
+        try:
+          af[alleles[int(indiv[2])]] += 1
+        except ValueError:
+          pass
 
       total = float(sum(af.values()))
-
       af = dict([(x, y / total) for x, y in af.items()])
-
       all_af[int(l[1])] = af
 
     return all_af
@@ -994,7 +1002,7 @@ class AnalyzeTrio():
 
   def go_variant(self):
     # load local allele frequencies
-    local_af = self.af_from_vcf(self.vcf_file)
+    local_af = {}#self.af_from_vcf(self.vcf_file)
 
     # for every variant
     s_time = time.time()
@@ -1002,13 +1010,19 @@ class AnalyzeTrio():
 
     for variant in self.variants():
       # what are the non-reference alleles?
-      all_seqs = filter(lambda x: x != ".", 
-        sum([variant[x].split("/") for x in self.stripped_samples], []))
-      nonref_seqs = set(all_seqs).difference(
+      all_seqs = set(filter(lambda x: x != ".", 
+        sum([variant[x].split("/") for x in self.stripped_samples], [])))
+      nonref_seqs = all_seqs.difference(
         self.pyf_genome[variant["chrom"]][variant["pos"]])
 
+      # first off, make an entry for each allele
+      for seq in all_seqs:
+        self.c.execute(
+          "INSERT INTO variant_tests (variant_id, allele) VALUES (%s, '%s')" %
+          (variant["variant_id"], seq))
+
       # non-synonymous mutations
-      if nonref_seqs:
+      if False:#nonref_seqs:
         # what transcripts overlap this variant
         enst_overlap = [x["name"] for x in self.c.execute(
           "SELECT name FROM ensGene WHERE bin IN (%s) AND chrom = '%s' AND " \
@@ -1024,6 +1038,8 @@ class AnalyzeTrio():
             muts = self.non_synonymous_tx(enst, mut = {"pos": variant["pos"], "seq": seq})
 
             for mut in muts:
+              print mut
+  
               self.c.execute(
                 "INSERT INTO variant_nonsyn (variant_id, allele, enst, mut) " \
                 "VALUES (%s, '%s', '%s', '%s')" % (variant["variant_id"],
@@ -1032,10 +1048,9 @@ class AnalyzeTrio():
                                                    "".join(map(str, mut))))
 
       # allele freqencies
-      global_af = self.tabix_af_in_region(self.global_vcf,
-                                          variant["chrom"].replace("chr", ""),
-                                          variant["pos"],
-                                          variant["pos"] + 1)
+      global_af = self.tabix_af_in_region_native(
+        self.global_vcf, variant["chrom"].replace("chr", ""),
+        variant["pos"], variant["pos"] + 1)
 
       for seq in all_seqs:
         # local
@@ -1050,18 +1065,10 @@ class AnalyzeTrio():
         except KeyError:
           global_seq_af = -1
 
-        if int(self.c.execute(
-           "SELECT COUNT(*) FROM variant_tests WHERE variant_id = '%s' AND allele = '%s'" %
-           (variant["variant_id"], seq)).fetchone()[0]) == 0:
-          self.c.execute(
-            "INSERT INTO variant_tests (variant_id, allele, local_af, global_af) " \
-            "VALUES (%s, '%s', %s, %s)" %
-            (variant["variant_id"], seq, local_seq_af, global_seq_af))
-        else:
-          self.c.execute(
-            "UPDATE variant_tests SET local_af = '%s', global_af = '%s' WHERE " \
-            "variant_id = '%s' AND allele = '%s'" % 
-            (local_seq_af, global_seq_af, variant["variant_id"], seq))
+        self.c.execute(
+          "UPDATE variant_tests SET local_af = '%s', global_af = '%s' WHERE " \
+          "variant_id = '%s' AND allele = '%s'" % 
+          (local_seq_af, global_seq_af, variant["variant_id"], seq))
 
       processed += 1
 
