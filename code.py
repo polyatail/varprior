@@ -1,3 +1,4 @@
+import pysam
 import os
 import math
 import matplotlib.pyplot as plt
@@ -588,6 +589,30 @@ class AnalyzeTrio():
   ##
   ## VCF ALLELE FREQUENCY METHODS
   ##
+
+  def tabix_af_in_region_native(self, vcf_file, chrom, start, end):
+    tbx = pysam.Tabixfile(vcf_file)
+    lines = tbx.fetch(chrom.replace("chr", ""), start, end)
+
+    all_af = {}
+
+    for l in lines:
+      l = l.strip().split("\t")
+
+      alleles = [l[3]] + l[4].split(",")
+      af = dict([(x, 0) for x in alleles])
+
+      for indiv in l[9:]
+        af[alleles[indiv[0]]] += 1
+        af[alleles[indiv[2]]] += 1
+
+      total = float(sum(af.values()))
+
+      af = dict([(x, y / total) for x, y in af.items()])
+
+      all_af[int(l[1])] = af
+
+    return all_af
 
   def tabix_af_in_region(self, vcf_file, chrom, start, end):
     # retrieve allele frequencies of SNPs in given region
