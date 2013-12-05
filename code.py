@@ -154,14 +154,11 @@ class AnalyzeTrio():
       c.execute("INSERT INTO metadata VALUES ('variants', '-1')")
 
       c.execute("CREATE INDEX IF NOT EXISTS ensgene_index ON ensGene(name);")
-      c.execute("CREATE INDEX IF NOT EXISTS ensgene_index2 ON ensGene(chrom);")
+      c.execute("CREATE INDEX IF NOT EXISTS ensgene_index2 ON ensGene(chrom, bin);")
       c.execute("CREATE INDEX IF NOT EXISTS ensgene_index3 ON ensGene(cdsStart);")
       c.execute("CREATE INDEX IF NOT EXISTS ensgene_index4 ON ensGene(cdsEnd);")
-      c.execute("CREATE INDEX IF NOT EXISTS ensgene_index5 ON ensGene(bin);")
-      c.execute("CREATE INDEX IF NOT EXISTS chrom_index ON variants(chrom);")
-      c.execute("CREATE INDEX IF NOT EXISTS chrom_index2 ON evs_pos(chrom);")
-      c.execute("CREATE INDEX IF NOT EXISTS pos_index ON variants(pos);")
-      c.execute("CREATE INDEX IF NOT EXISTS pos_index2 ON evs_pos(pos);")
+      c.execute("CREATE INDEX IF NOT EXISTS chrom_pos_index ON variants(chrom, pos);")
+      c.execute("CREATE INDEX IF NOT EXISTS chrom_pos_index2 ON evs_pos(chrom, pos);")
       c.execute("CREATE INDEX IF NOT EXISTS ensp_index ON ensp_to_enst(ensp);")
       c.execute("CREATE INDEX IF NOT EXISTS enst_index ON enst_to_gene_name(enst);")
       c.execute("CREATE INDEX IF NOT EXISTS gene_name_index ON enst_to_gene_name(gene_name);")
@@ -443,7 +440,7 @@ class AnalyzeTrio():
 
       for i in range(k):
         mother[i], father[i], child[i] = \
-          [pos[i][self.stripped_pedigree[x]].split("/") for x in \
+          [pos[i][self.stripped_pedigree[x]].split("/", 1) for x in \
           ("mother", "father", "child")]
 
         variant_ids.append(pos[i]["variant_id"])
@@ -460,6 +457,10 @@ class AnalyzeTrio():
           hits.append((variant_ids, result[1]))
 
     return hits
+
+  @staticmethod
+  def _mf_dummy(mother, father, child):
+    return (False, None)
 
   @staticmethod
   def _mf_recessive(mother, father, child):
@@ -506,42 +507,42 @@ class AnalyzeTrio():
     mother2, father2, child2 = mother[1], father[1], child[1]
 
     # 1. child heterozygous at both loci
-    if child[0][0] == child[0][1] or \
-       child[1][0] == child[1][1]:
+    if child1[0] == child1[1] or \
+       child2[0] == child2[1]:
       return (False, None)
     
     # there are four hypotheses. each position has two alleles,
     # and any combination of the two alleles at each position
     # could be causative
-    for child1, child2 in itertools.product(child[0], child[1]):
+    for c1, c2 in itertools.product(child1, child2):
       # 2. parents can't be homozygous for either of these variants
-      if (mother[0][0] == child1 and \
-          mother[0][1] == child1) or \
-         (father[0][0] == child1 and \
-          father[0][1] == child1):
+      if (mother1[0] == c1 and \
+          mother1[1] == c1) or \
+         (father1[0] == c1 and \
+          father1[1] == c1):
         continue
     
-      if (mother[1][0] == child2 and \
-          mother[1][1] == child2) or \
-         (father[1][0] == child2 and \
-          father[1][1] == child2):
+      if (mother2[0] == c2 and \
+          mother2[1] == c2) or \
+         (father2[0] == c2 and \
+          father2[1] == c2):
         continue
     
       # 3. causative variant must be heterozygous in one or neither parent
-      if (child1 in mother[0] and \
-          child1 in father[0]) or \
-         (child2 in mother[1] and \
-          child2 in father[1]):
+      if (c1 in mother1 and \
+          c1 in father1) or \
+         (c2 in mother2 and \
+          c2 in father2):
         continue
    
       # 5. both variants can't come from the same parent
-      if (child1 in mother[0] and \
-          child2 in mother[1]) or \
-         (child1 in father[0] and \
-          child2 in father[1]):
+      if (c1 in mother1 and \
+          c2 in mother2) or \
+         (c1 in father1 and \
+          c2 in father2):
         continue
 
-      return (True, (child1, child2))
+      return (True, (c1, c2))
 
     return (False, None)
 
@@ -1142,18 +1143,26 @@ class AnalyzeTrio():
     self.conn.commit()
 
   def go_tx(self):
+    s_time = time.time()
+    processed = 0
+
     for enst in self.tx_names():
       # fetch tx data
       enst_data = self.fetch_tx(enst)
       chrom, txStart, txEnd = [enst_data[x] for x in ("chrom", "txStart", "txEnd")]
 
       # mendelian inheritance patterns
+      comphet = []
+      recessive = []
+      dominant = []
       comphet = self.mendelian_filter(self._mf_compound_het_denovo, chrom,
                                       txStart, txEnd, k=2)
       recessive = self.mendelian_filter(self._mf_recessive, chrom,
                                         txStart, txEnd)
       dominant = self.mendelian_filter(self._mf_denovo_dominant, chrom,
                                        txStart, txEnd)
+      #dominant = self.mendelian_filter(self._mf_dummy, chrom,
+      #                                 txStart, txEnd)
 
       for test, results in zip(("comphet", "recessive", "dominant"), \
                                (comphet, recessive, dominant)):
@@ -1172,6 +1181,16 @@ class AnalyzeTrio():
             "INSERT INTO tx_mendel VALUES ('%s', '%s', %s, '%s', %s, '%s')" %
             (enst, test, varid1, allele1, varid2, allele2))
 
+      processed += 1
+
+      if processed % 100 == 0:
+        self.conn.commit()
+        sys.stderr.write("\rprocessed %s @ %.02f/s" %
+          (processed, processed / (time.time() - s_time)))
+
+    sys.stderr.write("\n")
+    self.conn.commit()
+
     self.conn.commit()
 
   def go_variant(self):
@@ -1181,7 +1200,7 @@ class AnalyzeTrio():
     for variant in self.variants():
       # what are the non-reference alleles?
       all_seqs = set(filter(lambda x: x != ".", 
-        sum([variant[x].split("/") for x in self.stripped_samples], [])))
+        sum([variant[x].split("/", 1) for x in self.stripped_samples], [])))
       nonref_seqs = all_seqs.difference(
         self.pyf_genome[variant["chrom"]][variant["pos"]])
 
@@ -1219,3 +1238,5 @@ a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 "data/20130918_ensGene.tab", "data/20130918_ensemblToGeneName.tab",
                 "data/human-protein.aliases.v9.05.txt", "data/human-protein.links.v9.05.txt",
                 "data/evs.txt")
+
+a.go_tx()
