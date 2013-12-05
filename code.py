@@ -255,6 +255,9 @@ class AnalyzeTrio():
       s_time = time.time()
       processed = 0
 
+      batch = []
+      cols = ["chrom", "pos"] + sum([["%s_1" % x, "%s_2" % x, "%s_QV" % x] for x in self.stripped_samples], [])
+
       for line in open(vcf_file, "r"):
         # parse the header, find columns of interest
         if line.startswith("#"):
@@ -274,9 +277,6 @@ class AnalyzeTrio():
         line_split = line.strip().split()
         chrom = "chr%s" % line_split[0]
 
-        batch = []
-        cols = ["chrom", "pos"] + sum([["%s_1" % x, "%s_2" % x, "%s_QV" % x] for x in self.stripped_samples], [])
-    
         sample_to_data = {}
     
         for sample, column in kept_cols: 
@@ -292,15 +292,18 @@ class AnalyzeTrio():
           col_data = dict(zip(f_names, f_data))
           col_data["GT"] = reduce(lambda x, y: x.replace(y, code[y]), code, col_data["GT"]).split("/", 1)
 
+          if "." in col_data["GT"]:
+            break
+
           sample_to_data[sample] = col_data
+        else:
+          data = [chrom, pos] + sum([[sample_to_data[x]["GT"][0],
+            sample_to_data[x]["GT"][1], sample_to_data[x]["GQ"] if "GQ" in sample_to_data[x] \
+            else "0"] for x in self.stripped_samples], [])
 
-        data = [chrom, pos] + sum([[sample_to_data[x]["GT"][0],
-          sample_to_data[x]["GT"][1], sample_to_data[x]["GQ"] if "GQ" in sample_to_data[x] \
-          else "0"] for x in self.stripped_samples], [])
+          batch.append(data)
+          processed += 1
 
-        batch.append(data)
-
-        processed += 1
         if processed % 100 == 0:
           self.c.executemany("INSERT INTO variants (%s) VALUES (%s)" %
             (", ".join(["'%s'" % x for x in cols]),
@@ -495,17 +498,10 @@ class AnalyzeTrio():
       variant_ids = []
 
       for i in range(k):
-        for var, name in zip((mother, father, child),
-                             ("mother", "father", "child")):
+        for var, name in zip((mother, father, child), ("mother", "father", "child")):
           var[i] = [pos[i]["%s%s" % (self.stripped_pedigree[name], x)] for x in ("_1", "_2")]
 
         variant_ids.append(pos[i]["variant_id"])
-
-        # if no variant reported, continue
-        if "." in mother[i] or \
-           "." in father[i] or \
-           "." in child[i]:
-          break
       else:
         result = m_filter(mother, father, child)
 
@@ -1202,23 +1198,20 @@ class AnalyzeTrio():
     s_time = time.time()
     processed = 0
 
+    batch = []
+
     for enst in self.tx_names():
       # fetch tx data
       enst_data = self.fetch_tx(enst)
       chrom, txStart, txEnd = [enst_data[x] for x in ("chrom", "txStart", "txEnd")]
 
       # mendelian inheritance patterns
-      comphet = []
-      recessive = []
-      dominant = []
       comphet = self.mendelian_filter(self._mf_compound_het_denovo, chrom,
                                       txStart, txEnd, k=2)
       recessive = self.mendelian_filter(self._mf_recessive, chrom,
                                         txStart, txEnd)
       dominant = self.mendelian_filter(self._mf_denovo_dominant, chrom,
                                        txStart, txEnd)
-      #dominant = self.mendelian_filter(self._mf_dummy, chrom,
-      #                                 txStart, txEnd)
 
       for test, results in zip(("comphet", "recessive", "dominant"), \
                                (comphet, recessive, dominant)):
@@ -1233,17 +1226,18 @@ class AnalyzeTrio():
             varid2 = "NULL"
             allele2 = "NULL"
  
-          self.c.execute(
-            "INSERT INTO tx_mendel VALUES ('%s', '%s', %s, '%s', %s, '%s')" %
-            (enst, test, varid1, allele1, varid2, allele2))
+          batch.append((enst, test, varid1, allele1, varid2, allele2))
 
       processed += 1
 
       if processed % 100 == 0:
+        self.c.executemany("INSERT INTO tx_mendel VALUES (?,?,?,?,?,?)", batch)
         self.conn.commit()
+        batch = []
         sys.stderr.write("\rprocessed %s @ %.02f/s" %
           (processed, processed / (time.time() - s_time)))
 
+    self.c.executemany("INSERT INTO tx_mendel VALUES (?,?,?,?,?,?)", batch)
     self.conn.commit()
     sys.stderr.write("\n")
 
@@ -1292,4 +1286,3 @@ a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 "data/20130918_ensGene.tab", "data/20130918_ensemblToGeneName.tab",
                 "data/human-protein.aliases.v9.05.txt", "data/human-protein.links.v9.05.txt",
                 "data/evs.txt")
-a.go_tx()
