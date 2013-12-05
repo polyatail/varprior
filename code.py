@@ -565,8 +565,8 @@ class AnalyzeTrio():
 
   def non_synonymous_tx(self, enst, stripped_sample = False, mut = False):
     # fetch exons
-    chrom = self.c.execute(
-      "SELECT chrom FROM ensGene WHERE name = '%s'" % enst).fetchone()[0]
+    chrom, strand = self.c.execute(
+      "SELECT chrom, strand FROM ensGene WHERE name = '%s'" % enst).fetchone()
     exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in self.c.execute(
       "SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % enst).fetchone()]
     cdsStart, cdsEnd = self.c.execute(
@@ -631,9 +631,14 @@ class AnalyzeTrio():
 
         # translate original and mutated proteins
         try:
-          orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
-          mut_protein1 = str(Seq("".join(mut_seq1)).translate(table=1))
-          mut_protein2 = str(Seq("".join(mut_seq2)).translate(table=1))
+          if strand == "-":
+            orig_protein = str(Seq("".join(orig_seq)).reverse_complement().translate(table=1))
+            mut_protein1 = str(Seq("".join(mut_seq1)).reverse_complement().translate(table=1))
+            mut_protein2 = str(Seq("".join(mut_seq2)).reverse_complement().translate(table=1))
+          else:
+            orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
+            mut_protein1 = str(Seq("".join(mut_seq1)).translate(table=1))
+            mut_protein2 = str(Seq("".join(mut_seq2)).translate(table=1))
         except TranslationError:
           sys.stderr.write("Transcript %s could not be translated\n" % enst)
           return ([], [])
@@ -657,8 +662,12 @@ class AnalyzeTrio():
           self.pyf_genome[chrom].__getitem__(slice(start, end), True))
 
         try:
-          orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
-          mut_protein = str(Seq("".join(mut_seq)).translate(table=1))
+          if strand == "-":
+            orig_protein = str(Seq("".join(orig_seq)).reverse_complement().translate(table=1))
+            mut_protein = str(Seq("".join(mut_seq)).reverse_complement().translate(table=1))
+          else:
+            orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
+            mut_protein = str(Seq("".join(mut_seq)).translate(table=1))
         except TranslationError:
           sys.stderr.write("Transcript %s could not be translated\n" % enst)
 
@@ -1191,8 +1200,8 @@ class AnalyzeTrio():
 
       # non-synonymous mutations
       if nonref_seqs:
-        #self.nonsyn_native(variant, nonref_seqs)
-        self.nonsyn_evs(variant, nonref_seqs)
+        self.nonsyn_native(variant, nonref_seqs)
+        #self.nonsyn_evs(variant, nonref_seqs)
 
       # allele freqencies
       #self.af_native(variant, all_seqs)
