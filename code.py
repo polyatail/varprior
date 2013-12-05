@@ -29,6 +29,7 @@ class AnalyzeTrio():
                     "net_cent": 1,
                     "net_nn": 1}
     self.network_score_cutoff = 677
+    self.exome_size = 30 * 10 ** 6
     self.top_genes = ["ADAMTS8", "AIRE", "AK2", "ATM", "BTK", "CD247", "CD3D",
                       "CD3G", "CD40LG", "CD8A", "CD8B", "CHD7", "CIITA",
                       "CORO1A", "CYBB", "DCLRE1C", "DKC1", "DOCK8", "FOXN1",
@@ -479,7 +480,7 @@ class AnalyzeTrio():
 
     if (child[0][1] not in mother[0] and \
         child[0][1] not in father[0]):
-      return (True, child[0][1])
+      return (True, (child[0][1]))
 
     return (False, None)
 
@@ -910,7 +911,7 @@ class AnalyzeTrio():
     # return weighted product score, combining scores with self.weights
     total_score = 1
 
-    for k, v in score_dict:
+    for k, v in score_dict.items():
         total_score *= float(v) ** self.weights[k]
 
     return total_score
@@ -920,7 +921,7 @@ class AnalyzeTrio():
     # return weighted sum score, combining scores with self.weights
     total_score = []
 
-    for k, v in score_dict:
+    for k, v in score_dict.items():
         total_score.append(float(v) * self.weights[k])
 
     return sum(total_score)
@@ -1041,9 +1042,9 @@ class AnalyzeTrio():
       # network gene placement score
       net_cent_perc, net_nn_perc = self.score_gene_percentile(gene)
 
-      self.c.execute(
-        "UPDATE gene_tests SET net_cent_perc = '%s', net_nn_perc = '%s' WHERE " \
-        "gene_name = '%s'" % (net_cent_perc, net_nn_perc, gene)) 
+#      self.c.execute(
+#        "UPDATE gene_tests SET net_cent_perc = '%s', net_nn_perc = '%s' WHERE " \
+#        "gene_name = '%s'" % (net_cent_perc, net_nn_perc, gene)) 
 
       # for every transcript that belongs to this gene
       gene_tx = [x["enst"] for x in self.c.execute(
@@ -1057,8 +1058,8 @@ class AnalyzeTrio():
         print "    tx: %s" % tx
 
         # fetch exon size for this transcript
-        exonStarts, exonEnds = [map(int, x.split(",")[:-1] for x in self.c.execute(
-          "SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % (tx)).fetchone())]
+        exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in self.c.execute(
+          "SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % tx).fetchone()]
 
         exon_size = sum([(x - y) for x, y in zip(exonEnds, exonStarts)])
 
@@ -1114,22 +1115,25 @@ class AnalyzeTrio():
 
           print "      m: %s" % m
 
-          model_score["nonsyn"] = sum([1 for x in m.values() if x["nonsyn"]]) /
-            float(len(m))
-          model_score["local_af"] = reduce(lambda x, y: x*y, [x["local_af"] for x in m.values()])
-          model_score["global_af"] = reduce(lambda x, y: x*y, [x["global_af"] for x in m.values()])
+          model_score["nonsyn"] = sum([1 for x in m.values() if x["nonsyn"]]) / float(len(m))
+          model_score["local_af"] = reduce(lambda x, y: x*y, [x["l_af"] for x in m.values()])
+          model_score["global_af"] = reduce(lambda x, y: x*y, [x["g_af"] for x in m.values()])
 
-          all_model_scores.append((wsm(model_score), model_score))
+          all_model_scores.append((self.wsm(model_score), model_score))
 
         best_model_score = sorted(all_model_scores, key=lambda x: x[0])[-1]
 
         all_tx_scores.append(best_model_score)
 
-      best_tx_score = sorted(all_tx_scores, key=lambda x: x[0])[-1][1]
+      if len(all_tx_scores) == 0:
+        best_tx_score = {}
+      else:
+        best_tx_score = sorted(all_tx_scores, key=lambda x: x[0])[-1][1]
+
       best_tx_score["net_cent"] = net_cent_perc
       best_tx_score["net_nn"] = net_nn_perc
 
-      gene_score = wsm(best_tx_score)
+      gene_score = self.wsm(best_tx_score)
 
       print gene, gene_score, best_tx_score
 
