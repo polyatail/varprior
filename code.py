@@ -61,6 +61,9 @@ class AnalyzeTrio():
     sys.stderr.write("loading db\n")
     self.conn, self.c, new_db = self.load_db()
 
+    sys.stderr.write("loading genome\n")
+    self.pyf_genome = self.load_genome()
+
     if new_db:
       sys.stderr.write("loading annotation\n")
       self.load_annotation(ensgene_file, enst_to_gene_name_file,
@@ -80,9 +83,6 @@ class AnalyzeTrio():
       self.gene_graph = self.load_string_network(string_links_file)
 
       networkx.write_gpickle(self.gene_graph, network_pickle)
-
-    sys.stderr.write("loading genome\n")
-    self.pyf_genome = self.load_genome()
 
   ##
   ## FILE/DATABASE METHODS
@@ -134,7 +134,7 @@ class AnalyzeTrio():
       c.execute("CREATE TABLE ensp_to_enst (ensp text, enst text)")   
       c.execute("CREATE TABLE enst_to_gene_name (enst text, gene_name text)")
       c.execute("CREATE TABLE variants (variant_id integer primary key, chrom text, pos int, %s)" %
-                ", ".join(["%s text" % x.replace("-", "") for x in self.sample_names]))
+                ", ".join(["%s_1 text, %s_2 text, %s_QV" % ((x.replace("-", ""),) * 3) for x in self.sample_names]))
       c.execute("CREATE TABLE gene_tests (gene_name text, net_cent_score float, " \
                 "net_cent_perc float, net_nn_score float, net_nn_perc float)")
       c.execute("CREATE TABLE tx_mendel (enst text, model text, varid1 int, " \
@@ -153,23 +153,13 @@ class AnalyzeTrio():
       c.execute("INSERT INTO metadata VALUES ('records', '-1')")
       c.execute("INSERT INTO metadata VALUES ('variants', '-1')")
 
-      c.execute("CREATE INDEX IF NOT EXISTS ensgene_index ON ensGene(name);")
-      c.execute("CREATE INDEX IF NOT EXISTS ensgene_index2 ON ensGene(chrom, bin);")
-      c.execute("CREATE INDEX IF NOT EXISTS ensgene_index3 ON ensGene(cdsStart);")
-      c.execute("CREATE INDEX IF NOT EXISTS ensgene_index4 ON ensGene(cdsEnd);")
-      c.execute("CREATE INDEX IF NOT EXISTS chrom_pos_index ON variants(chrom, pos);")
-      c.execute("CREATE INDEX IF NOT EXISTS chrom_pos_index2 ON evs_pos(chrom, pos);")
       c.execute("CREATE INDEX IF NOT EXISTS ensp_index ON ensp_to_enst(ensp);")
       c.execute("CREATE INDEX IF NOT EXISTS enst_index ON enst_to_gene_name(enst);")
       c.execute("CREATE INDEX IF NOT EXISTS gene_name_index ON enst_to_gene_name(gene_name);")
       c.execute("CREATE INDEX IF NOT EXISTS gene_name_index2 ON gene_tests(gene_name);")
-      c.execute("CREATE INDEX IF NOT EXISTS variant_id_index ON variants(variant_id);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index2 ON variant_tests(variant_id);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index3 ON variant_nonsyn(variant_id);")
       c.execute("CREATE INDEX IF NOT EXISTS allele_index ON variant_tests(allele);")
-      c.execute("CREATE INDEX IF NOT EXISTS evs_pos_id_index ON evs_pos(evs_pos_id);")
-      c.execute("CREATE INDEX IF NOT EXISTS evs_pos_id_index2 ON evs_alleles(evs_pos_id);")
-      c.execute("CREATE INDEX IF NOT EXISTS evs_pos_id_index3 ON evs_muts(evs_pos_id);")
 
       new_db = True
 
@@ -204,14 +194,33 @@ class AnalyzeTrio():
           "INSERT INTO ensp_to_enst VALUES ('%s', '%s')" % (line[1], line[2]))
 
     # load ensgene
-    for line_num, line in enumerate([x.strip().split() for x in open(ensgene_file)]):
-      if line_num == 0:
-        ensgene_keys = line
-      else:
-        self.c.execute("INSERT INTO ensGene VALUES (%s)" % ", ".join(["'%s'" % x for x in line]))
+    s_time = time.time()
+    processed = 0
+    batch = []
 
-    self.c.execute(
-      "UPDATE metadata SET value = '%s' WHERE key = 'records'" % line_num)
+    for line in open(ensgene_file, "r"):
+      line_split = line.strip().split()
+
+      if processed == 0:
+        ensgene_keys = line_split
+      else:
+        batch.append(line_split)
+
+      processed += 1
+      if processed % 100 == 0:
+        self.c.executemany("INSERT INTO ensGene VALUES (%s)" % (",".join(("?",) * len(ensgene_keys))), batch)
+        self.conn.commit()
+        batch = []
+        sys.stderr.write("\rprocessed %s @ %.02f/s" %
+          (processed, processed / (time.time() - s_time)))
+
+    self.c.executemany("INSERT INTO ensGene VALUES (%s)" % (",".join(("?",) * len(ensgene_keys))), batch)
+    sys.stderr.write("\nindexing\n")
+    self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'records'" % (processed - 1))
+    self.c.execute("CREATE INDEX IF NOT EXISTS ensgene_name ON ensGene(name);")
+    self.c.execute("CREATE INDEX IF NOT EXISTS ensgene_chrom_bin ON ensGene(chrom, bin);")
+    self.c.execute("CREATE INDEX IF NOT EXISTS ensgene_cdsStart ON ensGene(cdsStart);")
+    self.c.execute("CREATE INDEX IF NOT EXISTS ensgene_cdsEnd ON ensGene(cdsEnd);")
     self.conn.commit()
 
   def load_trio_vcf(self, vcf_file):
@@ -243,7 +252,8 @@ class AnalyzeTrio():
       if vcf_file == None:
         raise ValueError("Database empty and no vcf_file specified")
 
-      records = 0
+      s_time = time.time()
+      processed = 0
 
       for line in open(vcf_file, "r"):
         # parse the header, find columns of interest
@@ -252,7 +262,7 @@ class AnalyzeTrio():
             header = line.strip().split()
     
             try:
-              kept_cols = [(x, header.index(x)) for x in self.sample_names]
+              kept_cols = [(x.replace("-", ""), header.index(x)) for x in self.sample_names]
             except ValueError, error:
               raise ValueError(
                 "Specified sample (%s) not in VCF (%s)" % (error.split()[0],
@@ -263,8 +273,11 @@ class AnalyzeTrio():
         # parse rest of file
         line_split = line.strip().split()
         chrom = "chr%s" % line_split[0]
+
+        batch = []
+        cols = ["chrom", "pos"] + sum([["%s_1" % x, "%s_2" % x, "%s_QV" % x] for x in self.stripped_samples], [])
     
-        sample_to_snp = {}
+        sample_to_data = {}
     
         for sample, column in kept_cols: 
           pos = int(line_split[1])
@@ -272,25 +285,48 @@ class AnalyzeTrio():
           alt = [(str(x + 1), y) for x, y in enumerate(line_split[4].split(","))]
         
           code = dict([(str(0), ref)] + alt)
-        
-          genotype = line_split[column][:3]
-          genotype_coded = reduce(lambda x, y: x.replace(y, code[y]), code, genotype)
 
-          sample_to_snp[sample] = genotype_coded
+          f_names = line_split[8].split(":")
+          f_data = line_split[column].split(":")
 
-        self.c.execute("INSERT INTO variants VALUES (NULL, '%s', '%s', %s)" %
-          (chrom, pos,
-           ", ".join(["'%s'" % sample_to_snp[x] for x in self.sample_names])))
-        records += 1
+          col_data = dict(zip(f_names, f_data))
+          col_data["GT"] = reduce(lambda x, y: x.replace(y, code[y]), code, col_data["GT"]).split("/", 1)
 
+          sample_to_data[sample] = col_data
+
+        data = [chrom, pos] + sum([[sample_to_data[x]["GT"][0],
+          sample_to_data[x]["GT"][1], sample_to_data[x]["GQ"] if "GQ" in sample_to_data[x] \
+          else "0"] for x in self.stripped_samples], [])
+
+        batch.append(data)
+
+        processed += 1
+        if processed % 100 == 0:
+          self.c.executemany("INSERT INTO variants (%s) VALUES (%s)" %
+            (", ".join(["'%s'" % x for x in cols]),
+             ", ".join(["?" for _ in cols])), batch)
+          self.conn.commit()
+          batch = []
+          sys.stderr.write("\rprocessed %s @ %.02f/s" %
+            (processed, processed / (time.time() - s_time)))
+
+      self.c.executemany("INSERT INTO variants (%s) VALUES (%s)" %
+        (", ".join(["'%s'" % x for x in cols]),
+         ", ".join(["?" for _ in cols])), batch)
       self.c.execute("INSERT INTO metadata VALUES ('vcf_file', '%s')" % vcf_file)
-      self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % records)
+      self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % processed)
+      sys.stderr.write("\nindexing\n")
+      self.c.execute("CREATE INDEX IF NOT EXISTS variants_chrom_pos ON variants(chrom, pos);")
+      self.c.execute("CREATE INDEX IF NOT EXISTS variants_variant_id ON variants(variant_id);")
       self.conn.commit()
 
   def load_evs(self, evs_file):
     evs = dict([(x, {}) for x in self.pyf_genome.keys()])
 
-    for line_num, line in enumerate(open(evs_file)):
+    s_time = time.time()
+    processed = 0
+
+    for line in open(evs_file):
       if line.startswith("#"):
         continue
 
@@ -336,6 +372,15 @@ class AnalyzeTrio():
         for allele, count in af.items():
           evs[chrom][pos]["alleles"][allele] = count / total_count
 
+        processed += 1
+        if processed % 100 == 0:
+          sys.stderr.write("\rloaded %s @ %.02f/s" %
+            (processed, processed / (time.time() - s_time)))
+
+    sys.stderr.write("\n")
+    s_time = time.time()
+    processed = 0
+
     for chrom in evs:
       for pos in evs[chrom]:
         self.c.execute(
@@ -356,6 +401,17 @@ class AnalyzeTrio():
             "mut_aa, mut_nt, polyphen) VALUES (%s)" %
             (", ".join(["'%s'" % x for x in [evs_pos_id] + mut])))
 
+        processed += 1
+        if processed % 100 == 0:
+          self.conn.commit()
+          sys.stderr.write("\rinserted %s @ %.02f/s" %
+            (processed, processed / (time.time() - s_time)))
+
+    sys.stderr.write("\nindexing\n")
+    self.c.execute("CREATE INDEX IF NOT EXISTS evs_pos_chrom_pos ON evs_pos(chrom, pos);")
+    self.c.execute("CREATE INDEX IF NOT EXISTS evs_pos_evs_pos_id ON evs_pos(evs_pos_id);")
+    self.c.execute("CREATE INDEX IF NOT EXISTS evs_alleles_evs_pos_id ON evs_alleles(evs_pos_id);")
+    self.c.execute("CREATE INDEX IF NOT EXISTS evs_muts_evs_pos_id ON evs_muts(evs_pos_id);")
     self.conn.commit()
 
   @staticmethod
@@ -439,9 +495,9 @@ class AnalyzeTrio():
       variant_ids = []
 
       for i in range(k):
-        mother[i], father[i], child[i] = \
-          [pos[i][self.stripped_pedigree[x]].split("/", 1) for x in \
-          ("mother", "father", "child")]
+        for var, name in zip((mother, father, child),
+                             ("mother", "father", "child")):
+          var[i] = [pos[i]["%s%s" % (self.stripped_pedigree[name], x)] for x in ("_1", "_2")]
 
         variant_ids.append(pos[i]["variant_id"])
 
@@ -1188,10 +1244,8 @@ class AnalyzeTrio():
         sys.stderr.write("\rprocessed %s @ %.02f/s" %
           (processed, processed / (time.time() - s_time)))
 
+    self.conn.commit()
     sys.stderr.write("\n")
-    self.conn.commit()
-
-    self.conn.commit()
 
   def go_variant(self):
     s_time = time.time()
@@ -1199,8 +1253,8 @@ class AnalyzeTrio():
 
     for variant in self.variants():
       # what are the non-reference alleles?
-      all_seqs = set(filter(lambda x: x != ".", 
-        sum([variant[x].split("/", 1) for x in self.stripped_samples], [])))
+      all_seqs = set(filter(lambda x: x != ".",
+        [variant["%s%s" % (x, y)] for x in self.stripped_samples for y in ("_1", "_2")]))
       nonref_seqs = all_seqs.difference(
         self.pyf_genome[variant["chrom"]][variant["pos"]])
 
@@ -1226,8 +1280,8 @@ class AnalyzeTrio():
         sys.stderr.write("\rprocessed %s @ %.02f/s" %
           (processed, processed / (time.time() - s_time)))
 
-    sys.stderr.write("\n")
     self.conn.commit()
+    sys.stderr.write("\n")
 
 a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
@@ -1238,5 +1292,4 @@ a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 "data/20130918_ensGene.tab", "data/20130918_ensemblToGeneName.tab",
                 "data/human-protein.aliases.v9.05.txt", "data/human-protein.links.v9.05.txt",
                 "data/evs.txt")
-
 a.go_tx()
