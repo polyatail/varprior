@@ -548,7 +548,7 @@ class AnalyzeTrio():
   ## GENOME/CODING POTENTIAL METHODS
   ##
 
-  def non_synonymous_gene(self, gene_name, stripped_sample = False, mut = False):
+  def non_synonymous_gene(self, gene_name, mut):
     # gene_name -> enst
     all_enst = [x[0] for x in self.c.execute(
       "SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % \
@@ -561,20 +561,23 @@ class AnalyzeTrio():
 
     # examine each transcript isoform of this gene
     for enst in all_enst:
-      results[enst] = self.non_synonymous_tx(enst, stripped_sample, mut)
+      results[enst] = self.non_synonymous_tx(enst, mut)
 
-  def non_synonymous_tx(self, enst, stripped_sample = False, mut = False):
+  def non_synonymous_tx(self, enst, mut):
+    # no valid sequence
+    if mut["seq"] == ".":
+      return []
+
     # fetch exons
-    chrom, strand = self.c.execute(
-      "SELECT chrom, strand FROM ensGene WHERE name = '%s'" % enst).fetchone()
-    exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in self.c.execute(
-      "SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % enst).fetchone()]
-    cdsStart, cdsEnd = self.c.execute(
-      "SELECT cdsStart, cdsEnd FROM ensGene WHERE name = '%s'" % enst).fetchone()
+    chrom, strand, exonStarts, exonEnds, cdsStart, cdsEnd = self.c.execute(
+      "SELECT chrom, strand, exonStarts, exonEnds, cdsStart, cdsEnd FROM " \
+      "ensGene WHERE name = '%s'" % enst).fetchone()
 
     # non-coding
     if cdsStart == cdsEnd:
-      return ([], [])
+      return []
+
+    exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in (exonStarts, exonEnds)]
 
     coding_exons = []
 
@@ -609,74 +612,30 @@ class AnalyzeTrio():
       orig_seq.append(self.pyf_genome[chrom][start:end])
  
     # make given mutations
-    if mut == False and stripped_sample:
-      mut_seq1, mut_seq2 = [], []
+    self.pyf_genome[chrom][mut["pos"]] = mut["seq"]
 
-      for genotype_index, seq_list in ((0, mut_seq1), (1, mut_seq2)):
-        pos_in_region = self.c.execute(
-          "SELECT * FROM variants WHERE chrom = '%s' AND %s <= pos AND pos <= %s" %
-          (chrom, cdsStart, cdsEnd)).fetchall()
-    
-        for row in pos_in_region:
-          seq = row[stripped_sample].split("/")[genotype_index]
+    mut_seq = []
 
-          if seq == ".":
-            continue
+    for start, end in coding_exons:
+      mut_seq.append(
+        self.pyf_genome[chrom].__getitem__(slice(start, end), True))
 
-          self.pyf_genome[chrom][row["pos"]] = seq
-     
-          for start, end in coding_exons:
-            seq_list.append(
-              self.pyf_genome[chrom].__getitem__(slice(start, end), True))
-
-        # translate original and mutated proteins
-        try:
-          if strand == "-":
-            orig_protein = str(Seq("".join(orig_seq)).reverse_complement().translate(table=1))
-            mut_protein1 = str(Seq("".join(mut_seq1)).reverse_complement().translate(table=1))
-            mut_protein2 = str(Seq("".join(mut_seq2)).reverse_complement().translate(table=1))
-          else:
-            orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
-            mut_protein1 = str(Seq("".join(mut_seq1)).translate(table=1))
-            mut_protein2 = str(Seq("".join(mut_seq2)).translate(table=1))
-        except TranslationError:
-          sys.stderr.write("Transcript %s could not be translated\n" % enst)
-          return ([], [])
-    
-        allele1 = [(o, p, m) for p, (o, m) in \
-          enumerate(zip(orig_protein, mut_protein1)) if o != m]
-        allele2 = [(o, p, m) for p, (o, m) in \
-          enumerate(zip(orig_protein, mut_protein2)) if o != m]
-
-        return (allele1, allele2)
-    elif stripped_sample == False and mut:
-      if mut["seq"] == ".":
-        return []
+    try:
+      if strand == "-":
+        orig_protein = str(Seq("".join(orig_seq)).reverse_complement().translate(table=1))
+        mut_protein = str(Seq("".join(mut_seq)).reverse_complement().translate(table=1))
       else:
-        self.pyf_genome[chrom][mut["pos"]] = mut["seq"]
+        orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
+        mut_protein = str(Seq("".join(mut_seq)).translate(table=1))
 
-      mut_seq = []
+      diffs = [(o, p, m) for p, (o, m) in \
+        enumerate(zip(orig_protein, mut_protein)) if o != m]
+    except TranslationError:
+      sys.stderr.write("Transcript %s could not be translated\n" % enst)
 
-      for start, end in coding_exons:
-        mut_seq.append(
-          self.pyf_genome[chrom].__getitem__(slice(start, end), True))
+      diffs = []
 
-        try:
-          if strand == "-":
-            orig_protein = str(Seq("".join(orig_seq)).reverse_complement().translate(table=1))
-            mut_protein = str(Seq("".join(mut_seq)).reverse_complement().translate(table=1))
-          else:
-            orig_protein = str(Seq("".join(orig_seq)).translate(table=1))
-            mut_protein = str(Seq("".join(mut_seq)).translate(table=1))
-        except TranslationError:
-          sys.stderr.write("Transcript %s could not be translated\n" % enst)
-
-        diffs = [(o, p, m) for p, (o, m) in \
-          enumerate(zip(orig_protein, mut_protein)) if o != m]
-
-        return diffs
-    else:
-      raise ValueError("Must specify a mutation or a sample to pull variants from")
+    return diffs
 
   ##
   ## VCF ALLELE FREQUENCY METHODS
@@ -986,8 +945,6 @@ class AnalyzeTrio():
         muts = self.non_synonymous_tx(enst, mut = {"pos": variant["pos"], "seq": seq})
 
         for mut in muts:
-          print mut
-  
           self.c.execute(
             "INSERT INTO variant_nonsyn (variant_id, allele, enst, mut) " \
             "VALUES (%s, '%s', '%s', '%s')" % (variant["variant_id"],
@@ -1052,7 +1009,7 @@ class AnalyzeTrio():
 
       # global
       try:
-        global_seq_af = global_af[variant["chrom"]][variant["pos"]][seq]
+        global_seq_af = global_af[seq]
       except KeyError:
         global_seq_af = -1
 
