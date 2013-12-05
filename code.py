@@ -22,8 +22,8 @@ class AnalyzeTrio():
                genome_fasta, vcf_file = None, ensgene_file = None,
                enst_to_gene_name_file = None, string_alias_file = None,
                string_links_file = None, evs_file = None):
-    self.weights = {"mendelian": 1,
-                    "non-synonymous": 1,
+    self.weights = {"mendel": 1,
+                    "nonsyn": 1,
                     "global_af": 1,
                     "local_af": 1,
                     "net_cent": 1,
@@ -1026,6 +1026,16 @@ class AnalyzeTrio():
     # raw scores for network placement
     #self.score_all_genes(self.mk_subgraph())
 
+    # how many recessive, dominant, and comphet models are there
+    mendel_counts = {}
+
+    mendel_counts["recessive"] = self.c.execute(
+      "SELECT COUNT(*) FROM tx_mendel WHERE model = 'recessive'").fetchone()[0]
+    mendel_counts["dominant"] = self.c.execute(
+      "SELECT COUNT(*) FROM tx_mendel WHERE model = 'dominant'").fetchone()[0]
+    mendel_counts["comphet"] = self.c.execute(
+      "SELECT COUNT(*) FROM tx_mendel WHERE model = 'comphet'").fetchone()[0]
+
     # for every gene
     for gene in self.gene_names():
       # network gene placement score
@@ -1041,8 +1051,16 @@ class AnalyzeTrio():
 
       print "gene: %s\n  cent: %s\n  nn:   %s" % (gene, net_cent_perc, net_nn_perc)
 
+      all_tx_scores = []
+
       for tx in gene_tx:
         print "    tx: %s" % tx
+
+        # fetch exon size for this transcript
+        exonStarts, exonEnds = [map(int, x.split(",")[:-1] for x in self.c.execute(
+          "SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % (tx)).fetchone())]
+
+        exon_size = sum([(x - y) for x, y in zip(exonEnds, exonStarts)])
 
         # fetch every inheritance model in this transcript
         tx_models = self.c.execute(
@@ -1061,8 +1079,12 @@ class AnalyzeTrio():
           var_to_mut[(row["variant_id"], row["allele"])] = row["mut"]
 
         # iterate through all the models
+        all_model_scores = []
+
         for model in tx_models:
           print "      model: %s,%s,%s" % (model["model"], model["varid1"], model["varid2"])
+
+          model_score = {}
 
           m = {0: {"varid": model["varid1"],
                    "allele": model["allele1"]}}
@@ -1071,19 +1093,19 @@ class AnalyzeTrio():
             m[1] = {"varid": model["varid2"],
                     "allele": model["allele2"]}
 
-          #TODO: model -> p-value -- just newell-ikeda?
+          ni_T = self.exome_size / exon_size
+          ni_lambda = mendel_counts[model["model"]] / ni_T
+
+          model_score["mendel"] = self.newell_ikeda(1, ni_lambda, ni_T, 1)
 
           #TODO: add score for VCF QVs
 
           # allele frequency and non-synonymous
           for i in m:
-            try:
-              m[i]["l_af"], m[i]["g_af"] = self.c.execute(
-                "SELECT local_af, global_af FROM variant_tests WHERE " \
-                "variant_id = '%s' AND allele = '%s'" %
-                (m[i]["varid"], m[i]["allele"])).fetchone()
-            except TypeError:
-              import pdb; pdb.set_trace()
+            m[i]["l_af"], m[i]["g_af"] = self.c.execute(
+              "SELECT local_af, global_af FROM variant_tests WHERE " \
+              "variant_id = '%s' AND allele = '%s'" %
+              (m[i]["varid"], m[i]["allele"])).fetchone()
 
             try:
               m[i]["nonsyn"] = var_to_mut[(m[i]["varid"], m[i]["allele"])]
@@ -1092,16 +1114,26 @@ class AnalyzeTrio():
 
           print "      m: %s" % m
 
-            #TODO: af -> p-value
-            #TODO: non-syn -> p-value
+          model_score["nonsyn"] = sum([1 for x in m.values() if x["nonsyn"]]) /
+            float(len(m))
+          model_score["local_af"] = reduce(lambda x, y: x*y, [x["local_af"] for x in m.values()])
+          model_score["global_af"] = reduce(lambda x, y: x*y, [x["global_af"] for x in m.values()])
 
-          #TODO: combine model params -> pvalue
+          all_model_scores.append((wsm(model_score), model_score))
 
-        #TODO: take best-scoring model for this tx
+        best_model_score = sorted(all_model_scores, key=lambda x: x[0])[-1]
 
-      #TODO: take best-scoring tx for this gene
+        all_tx_scores.append(best_model_score)
 
-      #TODO: combine with gene network placement score -> final gene score
+      best_tx_score = sorted(all_tx_scores, key=lambda x: x[0])[-1][1]
+      best_tx_score["net_cent"] = net_cent_perc
+      best_tx_score["net_nn"] = net_nn_perc
+
+      gene_score = wsm(best_tx_score)
+
+      print gene, gene_score, best_tx_score
+
+      # UPDATE gene_tests SET final_score = '%s' WHERE gene_name = '%s'
 
     self.conn.commit()
 
