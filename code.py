@@ -21,7 +21,7 @@ class AnalyzeTrio():
   def __init__(self, sample_names, pedigree, varprior_db, network_pickle,
                genome_fasta, vcf_file = None, ensgene_file = None,
                enst_to_gene_name_file = None, string_alias_file = None,
-               string_links_file = None):
+               string_links_file = None, evs_file = None):
     self.weights = {"mendelian": 1,
                     "non-synonymous": 1,
                     "global_af": 1,
@@ -67,6 +67,9 @@ class AnalyzeTrio():
 
       sys.stderr.write("loading vcf\n")
       self.load_trio_vcf(vcf_file)
+
+      sys.stderr.write("loading evs data\n")
+      self.load_evs(evs_file)
 
     if os.path.isfile(network_pickle):
       sys.stderr.write("loading network (pickle)\n")
@@ -139,6 +142,11 @@ class AnalyzeTrio():
                 "local_af float, global_af float)")
       c.execute("CREATE TABLE variant_nonsyn (variant_id int, allele text, " \
                 "enst text, mut text)")
+      c.execute("CREATE TABLE evs_pos (evs_pos_id integer primary key, " \
+                "chrom text, pos int, phastcons float)")
+      c.execute("CREATE TABLE evs_alleles (evs_pos_id int, allele text, af float)")
+      c.execute("CREATE TABLE evs_muts (evs_pos_id int, gene_name text, " \
+                "tx_name text, status text, mut_aa text, mut_nt text, polyphen text)")
  
       c.execute("INSERT INTO metadata VALUES ('version', 'varprior-1.0')")
       c.execute("INSERT INTO metadata VALUES ('records', '-1')")
@@ -150,7 +158,9 @@ class AnalyzeTrio():
       c.execute("CREATE INDEX IF NOT EXISTS ensgene_index4 ON ensGene(cdsEnd);")
       c.execute("CREATE INDEX IF NOT EXISTS ensgene_index5 ON ensGene(bin);")
       c.execute("CREATE INDEX IF NOT EXISTS chrom_index ON variants(chrom);")
+      c.execute("CREATE INDEX IF NOT EXISTS chrom_index2 ON evs_pos(chrom);")
       c.execute("CREATE INDEX IF NOT EXISTS pos_index ON variants(pos);")
+      c.execute("CREATE INDEX IF NOT EXISTS pos_index2 ON evs_pos(pos);")
       c.execute("CREATE INDEX IF NOT EXISTS ensp_index ON ensp_to_enst(ensp);")
       c.execute("CREATE INDEX IF NOT EXISTS enst_index ON enst_to_gene_name(enst);")
       c.execute("CREATE INDEX IF NOT EXISTS gene_name_index ON enst_to_gene_name(gene_name);")
@@ -159,6 +169,9 @@ class AnalyzeTrio():
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index2 ON variant_tests(variant_id);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_id_index3 ON variant_nonsyn(variant_id);")
       c.execute("CREATE INDEX IF NOT EXISTS allele_index ON variant_tests(allele);")
+      c.execute("CREATE INDEX IF NOT EXISTS evs_pos_id_index ON evs_pos(evs_pos_id);")
+      c.execute("CREATE INDEX IF NOT EXISTS evs_pos_id_index2 ON evs_alleles(evs_pos_id);")
+      c.execute("CREATE INDEX IF NOT EXISTS evs_pos_id_index3 ON evs_muts(evs_pos_id);")
 
       new_db = True
 
@@ -275,6 +288,77 @@ class AnalyzeTrio():
       self.c.execute("INSERT INTO metadata VALUES ('vcf_file', '%s')" % vcf_file)
       self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % records)
       self.conn.commit()
+
+  def load_evs(self, evs_file):
+    evs = dict([(x, {}) for x in self.pyf_genome.keys()])
+
+    for line_num, line in enumerate(open(evs_file)):
+      if line.startswith("#"):
+        continue
+
+      line_split = line.strip().split()
+
+      chrom, pos = line_split[0].split(":")
+      chrom = "chr%s" % chrom
+
+      try:
+        evs[chrom][pos]
+      except KeyError:
+        evs[chrom][pos] = {}
+
+      try:
+        evs[chrom][pos]["phastcons"] = float(line_split[18])
+      except ValueError:
+        evs[chrom][pos]["phastcons"] = -1
+
+      try:
+        evs[chrom][pos]["muts"]
+      except KeyError:
+        evs[chrom][pos]["muts"] = []
+
+      if line_split[12] != "none":
+        evs[chrom][pos]["muts"].append(line_split[12:17] + [line_split[21]])
+
+      try:
+        evs[chrom][pos]["alleles"]
+      except KeyError:
+        evs[chrom][pos]["alleles"] = {}
+
+        af = dict([(x, int(y)) for x, y in [x.split("=") for x in line_split[6].split("/")]])
+        total_count = float(sum(af.values()))
+
+        if "R" in af:
+          o2n = dict([("A%s" % (x+1), y) for x, y in enumerate([x.split(">")[1] \
+            for x in line_split[3].split(";")])])
+          o2n["R"] = line_split[3].split(">")[0]
+
+          new_af = dict([(o2n[x], y) for x, y in af.items()])
+          af = new_af
+
+        for allele, count in af.items():
+          evs[chrom][pos]["alleles"][allele] = count / total_count
+
+    for chrom in evs:
+      for pos in evs[chrom]:
+        self.c.execute(
+          "INSERT INTO evs_pos (chrom, pos, phastcons) VALUES " \
+          "('%s', %s, %s)" % (chrom, pos, evs[chrom][pos]["phastcons"]))
+
+        evs_pos_id = self.c.lastrowid
+
+        for allele in evs[chrom][pos]["alleles"]:
+          self.c.execute(
+            "INSERT INTO evs_alleles (evs_pos_id, allele, af) VALUES " \
+            "(%s, '%s', %s)" % 
+            (evs_pos_id, allele, evs[chrom][pos]["alleles"][allele]))
+
+        for mut in evs[chrom][pos]["muts"]:
+          self.c.execute(
+            "INSERT INTO evs_muts (evs_pos_id, gene_name, tx_name, status, " \
+            "mut_aa, mut_nt, polyphen) VALUES (%s)" %
+            (", ".join(["'%s'" % x for x in [evs_pos_id] + mut])))
+
+    self.conn.commit()
 
   @staticmethod
   def region2bin (start, end, join = False):
@@ -465,10 +549,6 @@ class AnalyzeTrio():
   ##
 
   def non_synonymous_gene(self, gene_name, stripped_sample = False, mut = False):
-    # given gene name and set of SNPs, does protein product potentially
-    # yield a different protein product from that expected?
-    # snp_list = ((pos, mut), (pos, mut), ...)
-
     # gene_name -> enst
     all_enst = [x[0] for x in self.c.execute(
       "SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % \
@@ -878,6 +958,101 @@ class AnalyzeTrio():
     return sum(total_score)
 
   ##
+  ## NATIVE AND EXOME VARIANT SERVER OR OTHER TESTS
+  ##
+
+  def nonsyn_native(self, variant, nonref_seqs):
+    # what transcripts overlap this variant
+    enst_overlap = [x["name"] for x in self.c.execute(
+      "SELECT name FROM ensGene WHERE bin IN (%s) AND chrom = '%s' AND " \
+      "cdsStart <= %s AND %s <= cdsEnd" % (self.region2bin(variant["pos"],
+                                                           variant["pos"] + 1,
+                                                           True),
+                                           variant["chrom"],
+                                           variant["pos"],
+                                           variant["pos"])).fetchall()]
+
+    for enst in enst_overlap:
+      for seq in nonref_seqs:
+        muts = self.non_synonymous_tx(enst, mut = {"pos": variant["pos"], "seq": seq})
+
+        for mut in muts:
+          print mut
+  
+          self.c.execute(
+            "INSERT INTO variant_nonsyn (variant_id, allele, enst, mut) " \
+            "VALUES (%s, '%s', '%s', '%s')" % (variant["variant_id"],
+                                               seq,
+                                               enst,
+                                               "".join(map(str, mut))))
+
+  def nonsyn_evs(self, variant, nonref_seqs):
+    pass
+
+  def af_native(self, variant, all_seqs):
+    try:
+      self.local_af
+    except AttributeError:
+      self.local_af = self.af_from_vcf(self.vcf_file)
+
+    global_af = self.tabix_af_in_region_native(
+      self.global_vcf, variant["chrom"].replace("chr", ""),
+      variant["pos"], variant["pos"] + 1)
+
+    for seq in all_seqs:
+      # local
+      try:
+        local_seq_af = self.local_af[variant["chrom"]][variant["pos"]][seq]
+      except KeyError:
+        local_seq_af = -1
+
+      # global
+      try:
+        global_seq_af = global_af[variant["chrom"]][variant["pos"]][seq]
+      except KeyError:
+        global_seq_af = -1
+
+      self.c.execute(
+        "UPDATE variant_tests SET local_af = '%s', global_af = '%s' WHERE " \
+        "variant_id = '%s' AND allele = '%s'" % 
+        (local_seq_af, global_seq_af, variant["variant_id"], seq))
+
+  def af_evs(self, variant, all_seqs):
+    try:
+      self.local_af
+    except AttributeError:
+      self.local_af = self.af_from_vcf(self.vcf_file)
+
+    global_af_db = self.c.execute(
+      "SELECT allele, af FROM evs_pos, evs_alleles WHERE evs_pos.evs_pos_id = " \
+      "evs_alleles.evs_pos_id AND evs_pos.chrom = '%s' AND " \
+      "evs_pos.pos = '%s'" %
+      (variant["chrom"], variant["pos"])).fetchall()
+
+    global_af = {}
+
+    for row in global_af_db:
+      global_af[row["allele"]] = row["af"]
+
+    for seq in all_seqs:
+      # local
+      try:
+        local_seq_af = self.local_af[variant["chrom"]][variant["pos"]][seq]
+      except KeyError:
+        local_seq_af = -1
+
+      # global
+      try:
+        global_seq_af = global_af[variant["chrom"]][variant["pos"]][seq]
+      except KeyError:
+        global_seq_af = -1
+
+      self.c.execute(
+        "UPDATE variant_tests SET local_af = '%s', global_af = '%s' WHERE " \
+        "variant_id = '%s' AND allele = '%s'" % 
+        (local_seq_af, global_seq_af, variant["variant_id"], seq))
+
+  ##
   ## RUN THE ANALYSIS
   ##
 
@@ -965,10 +1140,7 @@ class AnalyzeTrio():
     self.conn.commit()
 
   def go_tx(self):
-    # for every enst
     for enst in self.tx_names():
-      print enst
-
       # fetch tx data
       enst_data = self.fetch_tx(enst)
       chrom, txStart, txEnd = [enst_data[x] for x in ("chrom", "txStart", "txEnd")]
@@ -1001,10 +1173,6 @@ class AnalyzeTrio():
     self.conn.commit()
 
   def go_variant(self):
-    # load local allele frequencies
-    local_af = {}#self.af_from_vcf(self.vcf_file)
-
-    # for every variant
     s_time = time.time()
     processed = 0
 
@@ -1022,53 +1190,13 @@ class AnalyzeTrio():
           (variant["variant_id"], seq))
 
       # non-synonymous mutations
-      if False:#nonref_seqs:
-        # what transcripts overlap this variant
-        enst_overlap = [x["name"] for x in self.c.execute(
-          "SELECT name FROM ensGene WHERE bin IN (%s) AND chrom = '%s' AND " \
-          "cdsStart <= %s AND %s <= cdsEnd" % (self.region2bin(variant["pos"],
-                                                               variant["pos"] + 1,
-                                                               True),
-                                               variant["chrom"],
-                                               variant["pos"],
-                                               variant["pos"])).fetchall()]
-
-        for enst in enst_overlap:
-          for seq in nonref_seqs:
-            muts = self.non_synonymous_tx(enst, mut = {"pos": variant["pos"], "seq": seq})
-
-            for mut in muts:
-              print mut
-  
-              self.c.execute(
-                "INSERT INTO variant_nonsyn (variant_id, allele, enst, mut) " \
-                "VALUES (%s, '%s', '%s', '%s')" % (variant["variant_id"],
-                                                   seq,
-                                                   enst,
-                                                   "".join(map(str, mut))))
+      if nonref_seqs:
+        #self.nonsyn_native(variant, nonref_seqs)
+        self.nonsyn_evs(variant, nonref_seqs)
 
       # allele freqencies
-      global_af = self.tabix_af_in_region_native(
-        self.global_vcf, variant["chrom"].replace("chr", ""),
-        variant["pos"], variant["pos"] + 1)
-
-      for seq in all_seqs:
-        # local
-        try:
-          local_seq_af = local_af[variant["chrom"]][variant["pos"]][seq]
-        except KeyError:
-          local_seq_af = -1
-
-        # global
-        try:
-          global_seq_af = global_af[variant["chrom"]][variant["pos"]][seq]
-        except KeyError:
-          global_seq_af = -1
-
-        self.c.execute(
-          "UPDATE variant_tests SET local_af = '%s', global_af = '%s' WHERE " \
-          "variant_id = '%s' AND allele = '%s'" % 
-          (local_seq_af, global_seq_af, variant["variant_id"], seq))
+      #self.af_native(variant, all_seqs)
+      self.af_evs(variant, all_seqs)
 
       processed += 1
 
@@ -1087,4 +1215,5 @@ a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
                 "data/hg19.fa",
                 "data/exomes_49.vcf",
                 "data/20130918_ensGene.tab", "data/20130918_ensemblToGeneName.tab",
-                "data/human-protein.aliases.v9.05.txt", "data/human-protein.links.v9.05.txt")
+                "data/human-protein.aliases.v9.05.txt", "data/human-protein.links.v9.05.txt",
+                "data/evs.txt")
