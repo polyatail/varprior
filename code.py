@@ -1,4 +1,6 @@
+from multiprocessing import Pool
 import pysam
+from functools import partial
 import os
 import math
 import matplotlib.pyplot as plt
@@ -16,6 +18,58 @@ import networkx
 from networkx.exception import NetworkXNoPath
 import tempfile
 import subprocess
+
+##
+## GENE NETWORK SCORE FUNCTION -- MUST BE OUTSIDE CLASS FOR MP
+##
+
+def score_gene(gene, graph, top_genes): 
+  if gene not in graph or \
+     graph.degree(gene) == 0:
+    harmonic_centrality = -1
+    nearest_neighbor = -1
+  else:
+    dist_to_top_genes = []
+
+    # shortest path by weight to each of top genes
+    for top_gene in top_genes:
+      if top_gene == gene:
+        continue
+
+      try:
+        path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
+      except (NetworkXNoPath, KeyError):
+        continue
+
+      weights = []
+ 
+      for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
+        weights.append(graph[node_from][node_to]["weight"])
+
+      dist_to_top_genes.append(float(sum(weights)))
+
+    harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
+    nearest_neighbor = sorted(dist_to_top_genes)[0]
+
+    print "gene:  %s\n  c:   %s\n  n:   %s" % (gene, harmonic_centrality, nearest_neighbor)
+
+  return (gene, harmonic_centrality, nearest_neighbor)
+
+def load_trio():
+  globals()["a"] = AnalyzeTrio(
+    ("jp-scid7a", "jp-scid7b", "jp-scid7c"),
+    {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
+    "varprior.db",
+    "varprior.gpickle",
+    "data/hg19.fa",
+    "data/exomes_49.vcf",
+    "data/20130918_ensGene.tab", "data/20130918_ensemblToGeneName.tab",
+    "data/human-protein.aliases.v9.05.txt", "data/human-protein.links.v9.05.txt",
+    "data/evs.txt")
+
+##
+## MAIN CLASS
+##
 
 class AnalyzeTrio():
   def __init__(self, sample_names, pedigree, varprior_db, network_pickle,
@@ -870,57 +924,30 @@ class AnalyzeTrio():
     # harmonic centrality defines how well connected a gene is all puck genes
     # nearest-neighobr defines how close a gene is to its nearest puck gene
 
-    gene_to_scores = {}
-
-    for gene in self.gene_names():
-      dist_to_top_genes = []
- 
-      if gene not in graph or \
-         graph.degree(gene) == 0:
-        harmonic_centrality = -1
-        nearest_neighbor = -1
-      else:
-        # shortest path by weight to each of top genes
-        for top_gene in self.top_genes:
-          if top_gene == gene:
-            continue
-
-          try:
-            path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
-          except (NetworkXNoPath, KeyError):
-            continue
-
-          weights = []
- 
-          for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
-            weights.append(graph[node_from][node_to]["weight"])
-
-          dist_to_top_genes.append(float(sum(weights)))
-
-        harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
-        nearest_neighbor = sorted(dist_to_top_genes)[0]
-
-      gene_to_scores[gene] = (harmonic_centrality, nearest_neighbor)
+    p = Pool(5)
+    partial_score_gene = partial(score_gene, graph=graph, top_genes=self.top_genes)
+    result = p.map(partial_score_gene, self.gene_names())
+    p.close()
 
     # and now go through and convert them all to percentiles
-    net_cent_hist = numpy.array([x["cent_score"] for x in gene_to_scores.values()])
-    net_nn_hist = numpy.array([x["nn_score"] for x in gene_to_scores.values()])
+    cent_hist = numpy.array([x[1] for x in result])
+    nn_hist = numpy.array([x[2] for x in result])
 
     batch = []
 
-    for gene, vals in gene_to_scores.items():
+    for gene, cent_score, nn_score in result:
       # edge case: gene is a top gene
       if gene in self.top_genes:
         cent_perc = 1
         nn_perc = 1
       # edge case: gene isn't in network
-      elif gene_to_scores[gene]["cent_score"] == -1 or \
-         gene_to_scores[gene]["nn_score"] == -1:
+      elif cent_score == -1 or \
+           nn_score == -1:
         cent_perc = 0
         nn_perc = 0
       else:
-        cent_perc = scipy.stats.percentileofscore(net_cent_hist, vals[0]) / 100.0
-        nn_perc = 1 - scipy.stats.percentileofscore(net_nn_hist, vals[1]) / 100.0
+        cent_perc = scipy.stats.percentileofscore(cent_hist, cent_score) / 100.0
+        nn_perc = 1 - scipy.stats.percentileofscore(nn_hist, nn_score) / 100.0
 
         print """
 gene:  %s
@@ -928,9 +955,9 @@ gene:  %s
   c_p: %s
   n:   %s
   n_p: %s
-""" % (gene, vals[0], cent_perc, vals[1], nn_perc)
+""" % (gene, cent_score, cent_perc, nn_score, nn_perc)
 
-      batch.append((gene, vals[0], cent_perc, vals[1], nn_perc))
+      batch.append((gene, cent_score, cent_perc, nn_score, nn_perc))
 
     self.c.executemany("INSERT INTO gene_tests (gene_name, net_cent_score, " \
       "net_cent_perc, net_nn_score, net_nn_perc) VALUES (?,?,?,?,?)", batch)
@@ -1258,13 +1285,3 @@ gene:  %s
 
     self.conn.commit()
     sys.stderr.write("\n")
-
-a = AnalyzeTrio(("jp-scid7a", "jp-scid7b", "jp-scid7c"),
-                {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
-                "varprior.db",
-                "varprior.gpickle",
-                "data/hg19.fa",
-                "data/exomes_49.vcf",
-                "data/20130918_ensGene.tab", "data/20130918_ensemblToGeneName.tab",
-                "data/human-protein.aliases.v9.05.txt", "data/human-protein.links.v9.05.txt",
-                "data/evs.txt")
