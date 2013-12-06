@@ -698,28 +698,32 @@ class AnalyzeTrio():
     exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in (exonStarts, exonEnds)]
 
     coding_exons = []
+    middle = False
 
     # reduce coordinates to those that are coding
     for start, end in zip(exonStarts, exonEnds):
-      # exon occurs before coding start
-      if end < cdsStart:
-        continue
-      # edge case: exon contains coding start AND end
-      elif start <= cdsStart < end and \
-           start <= cdsEnd < end:
-        coding_exons.append((cdsStart, cdsEnd))
-        break
-      # exon contains coding start
-      elif start <= cdsStart < end:
-        coding_exons.append((cdsStart, end))
-        continue
-      # exon contains coding end
-      elif start <= cdsEnd < end:
-        coding_exons.append((start, cdsEnd))
-        break
+      if middle:
+        # exon contains coding end
+        if start <= cdsEnd < end:
+          coding_exons.append((start, cdsEnd))
+          break
 
-      # everything else should be in the middle of the coding region
-      coding_exons.append((start, end))
+        # everything else should be in the middle of the coding region
+        coding_exons.append((start, end))
+      else:
+        # exon occurs before coding start
+        if end < cdsStart:
+          continue
+        # edge case: exon contains coding start AND end
+        elif start <= cdsStart < end and \
+             start <= cdsEnd < end:
+          coding_exons.append((cdsStart, cdsEnd))
+          break
+        # exon contains coding start
+        elif start <= cdsStart < end:
+          coding_exons.append((cdsStart, end))
+          middle = True
+          continue
 
     self.pyf_genome[chrom].clearmuts()
 
