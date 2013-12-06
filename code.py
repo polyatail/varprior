@@ -79,10 +79,10 @@ class AnalyzeTrio():
                enst_to_gene_name_file = None, string_alias_file = None,
                string_links_file = None, evs_file = None):
     self.weights = {"mendel": 1,
-                    "nonsyn": 1,
-                    "qv": 1 / 970299.0,
-                    "global_af": 1,
-                    "local_af": 1,
+                    "nonsyn": 3,
+                    "qv": 2,
+                    "global_af": -6,
+                    "local_af": -6,
                     "net_cent": 1,
                     "net_nn": 1}
     self.network_score_cutoff = 677
@@ -216,6 +216,7 @@ class AnalyzeTrio():
       c.execute("CREATE INDEX IF NOT EXISTS gene_tests_gene_name ON gene_tests(gene_name);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_tests_variant_id_allele ON variant_tests(variant_id, allele);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_nonsyn_variant_id ON variant_nonsyn(variant_id);")
+      c.execute("CREATE INDEX IF NOT EXISTS variant_nonsyn_enst ON variant_nonsyn(enst);")
       c.execute("CREATE INDEX IF NOT EXISTS enst_tx_mendel ON tx_mendel(enst);")
 
       new_db = True
@@ -713,7 +714,7 @@ class AnalyzeTrio():
 
     for start, end in coding_exons:
       orig_seq.append(self.pyf_genome[chrom][start:end])
- 
+
     # make given mutations
     self.pyf_genome[chrom][mut["pos"]] = mut["seq"]
 
@@ -982,6 +983,7 @@ gene:  %s
     total_score = 1
 
     for k, v in score_dict.items():
+      if not k.startswith("_"):
         total_score *= float(v) ** self.weights[k]
 
     return total_score
@@ -992,6 +994,7 @@ gene:  %s
     total_score = []
 
     for k, v in score_dict.items():
+      if not k.startswith("_"):
         total_score.append(float(v) * self.weights[k])
 
     return sum(total_score)
@@ -1013,7 +1016,7 @@ gene:  %s
 
     for enst in enst_overlap:
       for seq in nonref_seqs:
-        muts = self.non_synonymous_tx(enst, mut = {"pos": variant["pos"], "seq": seq})
+        muts = self.non_synonymous_tx(enst, mut = {"pos": variant["pos"] - 1, "seq": seq})
 
         for mut in muts:
           self.c.execute(
@@ -1112,12 +1115,12 @@ gene:  %s
       gene_tx = [x["enst"] for x in self.c.execute(
         "SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene).fetchall()]
 
-      print "gene: %s\n  cent: %s\n  nn:   %s" % (gene, cent_perc, nn_perc)
+      #print "gene: %s\n  cent: %s\n  nn:   %s" % (gene, cent_perc, nn_perc)
 
       all_tx_scores = []
 
       for tx in gene_tx:
-        print "    tx: %s" % tx
+        #print "    tx: %s" % tx
 
         # fetch every inheritance model in this transcript
         tx_models = self.c.execute(
@@ -1145,8 +1148,8 @@ gene:  %s
         all_model_scores = []
 
         for model in tx_models:
-          print "      model: %s,%s=%s,%s=%s" % (model["model"], model["varid1"],
-            model["allele1"], model["varid2"], model["allele2"])
+          #print "      model: %s,%s=%s,%s=%s" % (model["model"], model["varid1"],
+          #  model["allele1"], model["varid2"], model["allele2"])
 
           model_score = {}
 
@@ -1181,17 +1184,19 @@ gene:  %s
             except KeyError:
               m[i]["nonsyn"] = False
 
-          print "      m: %s" % m
+          #print "      m: %s" % m
 
           model_score["nonsyn"] = sum([1 for x in m.values() if x["nonsyn"]]) / float(len(m))
           model_score["local_af"] = reduce(lambda x, y: x*y, [x["l_af"] for x in m.values()])
           model_score["global_af"] = reduce(lambda x, y: x*y, [x["g_af"] for x in m.values()])
-          model_score["qv"] = reduce(lambda x, y: x*y, sum([x["qv"] for x in m.values()], []))
+          model_score["global_af"] = 0 if model_score["global_af"] < 0 else model_score["global_af"]
+          model_score["qv"] = sum(sum([x["qv"] for x in m.values()], [])) / \
+            (594.0 if model["model"] == "comphet" else 297)
+          model_score["_model"] = model
 
           all_model_scores.append((self.wsm(model_score), model_score))
 
         best_model_score = sorted(all_model_scores, key=lambda x: x[0])[-1]
-
         all_tx_scores.append(best_model_score)
 
       if len(all_tx_scores) == 0:
