@@ -60,6 +60,7 @@ def score_gene(gene, graph, top_genes):
 def load_trio():
   globals()["a"] = AnalyzeTrio(
     {"mother": "jp-scid7b", "father": "jp-scid7c", "child": "jp-scid7a"},
+    "male",
     "varprior.db",
     "varprior.gpickle",
     "data/hg19.fa",
@@ -73,7 +74,7 @@ def load_trio():
 ##
 
 class AnalyzeTrio():
-  def __init__(self, pedigree, varprior_db, network_pickle,
+  def __init__(self, pedigree, child_gender, varprior_db, network_pickle,
                genome_fasta, vcf_file = None, ensgene_file = None,
                enst_to_gene_name_file = None, string_alias_file = None,
                string_links_file = None, evs_file = None):
@@ -96,6 +97,8 @@ class AnalyzeTrio():
                       "ZAP70", "ZBTB1"]
     self.global_vcf = "data/AFR.2of4intersection_allele_freq" \
                       ".20100804.genotypes.vcf.gz"
+
+    self.child_gender = child_gender
 
     self.sample_names = pedigree.values()
     self.stripped_samples = [x.replace("-", "") for x in pedigree.values()]
@@ -566,6 +569,18 @@ class AnalyzeTrio():
 
   @staticmethod
   def _mf_dummy(mother, father, child):
+    return (False, None)
+
+  @staticmethod
+  def _mf_xlinked(mother, father, son):
+    # at least one reported allele in son must not be in father and be present
+    # no more than once in the mother
+    for c in child[0]:
+      if c not in father[0] and \
+        (mother[0][0] != c or \
+         mother[0][1] != c):
+        return (True, (c,))
+
     return (False, None)
 
   @staticmethod
@@ -1098,6 +1113,8 @@ gene:  %s
     # how many recessive, dominant, and comphet models are there
     mendel_counts = {}
 
+    mendel_counts["xlinked"] = self.c.execute(
+      "SELECT COUNT(*) FROM tx_mendel WHERE model = 'xlinked'").fetchone()[0]
     mendel_counts["recessive"] = self.c.execute(
       "SELECT COUNT(*) FROM tx_mendel WHERE model = 'recessive'").fetchone()[0]
     mendel_counts["dominant"] = self.c.execute(
@@ -1227,15 +1244,22 @@ gene:  %s
       chrom, txStart, txEnd = [enst_data[x] for x in ("chrom", "txStart", "txEnd")]
 
       # mendelian inheritance patterns
-      comphet = self.mendelian_filter(self._mf_compound_het_denovo, chrom,
-                                      txStart, txEnd, k=2)
-      recessive = self.mendelian_filter(self._mf_recessive, chrom,
+      if chrom == "chrX" and \
+         self.child_gender == "male":
+        comphet, recessive, dominant = [], [], []
+        xlinked = self.mendelian_filter(self._mf_xlinked, chrom,
                                         txStart, txEnd)
-      dominant = self.mendelian_filter(self._mf_denovo_dominant, chrom,
-                                       txStart, txEnd)
+      else:
+        xlinked = []
+        comphet = self.mendelian_filter(self._mf_compound_het_denovo, chrom,
+                                        txStart, txEnd, k=2)
+        recessive = self.mendelian_filter(self._mf_recessive, chrom,
+                                          txStart, txEnd)
+        dominant = self.mendelian_filter(self._mf_denovo_dominant, chrom,
+                                         txStart, txEnd)
 
-      for test, results in zip(("comphet", "recessive", "dominant"), \
-                               (comphet, recessive, dominant)):
+      for test, results in zip(("xlinked", "comphet", "recessive", "dominant"), \
+                               (xlinked, comphet, recessive, dominant)):
         for result in results:
           varid1 = result[0][0]
           allele1 = result[1][0]
