@@ -24,6 +24,7 @@ class AnalyzeTrio():
                string_links_file = None, evs_file = None):
     self.weights = {"mendel": 1,
                     "nonsyn": 1,
+                    "qv": 1,
                     "global_af": 1,
                     "local_af": 1,
                     "net_cent": 1,
@@ -183,10 +184,6 @@ class AnalyzeTrio():
       self.c.execute(
         "INSERT INTO enst_to_gene_name VALUES ('%s', '%s')" % (line[0], line[1]))
 
-    self.c.execute(
-      "INSERT INTO gene_tests (gene_name) SELECT gene_name FROM " \
-      "enst_to_gene_name GROUP BY gene_name")
- 
     # load string aliases (translates ENSP -> ENST/ENSG)
     for line in [x.strip().split() for x in open(string_alias_file)]:
       if line[2].startswith("ENST"):
@@ -224,8 +221,6 @@ class AnalyzeTrio():
     self.conn.commit()
 
   def load_trio_vcf(self, vcf_file):
-    #TODO: load QVs from VCF
-    #TODO: add function to import QVs into db post hoc
     assert self.conn, self.c
 
     variant_count = int(self.c.execute(
@@ -324,6 +319,8 @@ class AnalyzeTrio():
       self.conn.commit()
 
   def load_evs(self, evs_file):
+    assert self.conn, self.c
+
     evs = dict([(x, {}) for x in self.pyf_genome.keys()])
 
     s_time = time.time()
@@ -618,10 +615,6 @@ class AnalyzeTrio():
       results[enst] = self.non_synonymous_tx(enst, mut)
 
   def non_synonymous_tx(self, enst, mut):
-    # no valid sequence
-    if mut["seq"] == ".":
-      return []
-
     # fetch exons
     chrom, strand, exonStarts, exonEnds, cdsStart, cdsEnd = self.c.execute(
       "SELECT chrom, strand, exonStarts, exonEnds, cdsStart, cdsEnd FROM " \
@@ -671,8 +664,7 @@ class AnalyzeTrio():
     mut_seq = []
 
     for start, end in coding_exons:
-      mut_seq.append(
-        self.pyf_genome[chrom].__getitem__(slice(start, end), True))
+      mut_seq.append(self.pyf_genome[chrom].__getitem__(slice(start, end), True))
 
     try:
       if strand == "-":
@@ -878,9 +870,10 @@ class AnalyzeTrio():
     # two scores:
     # harmonic centrality defines how well connected a gene is all puck genes
     # nearest-neighobr defines how close a gene is to its nearest puck gene
-    gene_names = self.gene_names()
 
-    for gene in gene_names:
+    gene_to_scores = {}
+
+    for gene in self.gene_names()
       dist_to_top_genes = []
  
       if gene not in graph or \
@@ -908,46 +901,41 @@ class AnalyzeTrio():
         harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
         nearest_neighbor = sorted(dist_to_top_genes)[0]
 
-        print "gene: %s\ncent: %s\nnn:   %s" % (gene, harmonic_centrality, nearest_neighbor)
+      gene_to_scores[gene] = (harmonic_centrality, nearest_neighbor)
 
-      self.c.execute(
-        "UPDATE gene_tests SET net_cent_score = '%s', net_nn_score = '%s'" \
-        " WHERE gene_name = '%s'" % (harmonic_centrality, nearest_neighbor, gene))
+    # and now go through and convert them all to percentiles
+    net_cent_hist = numpy.array([x["cent_score"] for x in gene_to_scores.values()])
+    net_nn_hist = numpy.array([x["nn_score"] for x in gene_to_scores.values()])
 
+    batch = []
+
+    for gene, vals in gene_to_scores.items():
+      # edge case: gene is a top gene
+      if gene in self.top_genes:
+        cent_perc = 1
+        nn_perc = 1
+      # edge case: gene isn't in network
+      elif gene_to_scores[gene]["cent_score"] == -1 or \
+         gene_to_scores[gene]["nn_score"] == -1:
+        cent_perc = 0
+        nn_perc = 0
+      else:
+        cent_perc = scipy.stats.percentileofscore(net_cent_hist, vals[0]) / 100.0
+        nn_perc = 1 - scipy.stats.percentileofscore(net_nn_hist, vals[1]) / 100.0
+
+        print """
+gene:  %s
+  c:   %s
+  c_p: %s
+  n:   %s
+  n_p: %s
+""" % (gene, vals[0], cent_perc, vals[1], nn_perc)
+
+      batch.append((gene, vals[0], cent_perc, vals[1], nn_perc))
+
+    self.c.executemany("INSERT INTO gene_tests (gene_name, net_cent_score, " \
+      "net_cent_perc, net_nn_score, net_nn_perc) VALUES (?,?,?,?,?)", batch)
     self.conn.commit()
- 
-  def score_gene_percentile(self, gene_name):
-    # edge case: one of top genes
-    if gene_name in self.top_genes:
-      return (1, 1)
-
-    assert self.conn, self.c
-
-    try:
-      self.net_cent_hist
-    except AttributeError:
-      self.net_cent_hist = numpy.array([x[0] for x in \
-        self.c.execute("SELECT net_cent_score FROM gene_tests").fetchall() if \
-        x[0] != -1])
-
-    try:
-      self.net_nn_hist
-    except AttributeError:
-      self.net_nn_hist = numpy.array([x[0] for x in \
-        self.c.execute("SELECT net_nn_score FROM gene_tests").fetchall() if \
-        x[0] != -1])
-
-    net_cent_score, net_nn_score = self.c.execute(
-      "SELECT net_cent_score, net_nn_score FROM gene_tests WHERE " \
-      "gene_name = '%s'" % gene_name).fetchone()
-
-    # edge case: not in network
-    if net_cent_score == -1 or \
-       net_nn_score == -1:
-      return (0, 0)
-    else:
-      return (scipy.stats.percentileofscore(self.net_cent_hist, net_cent_score) / 100.0,
-              1 - scipy.stats.percentileofscore(self.net_nn_hist, net_nn_score) / 100.0)
 
   ##
   ## STATISTICS METHODS
@@ -986,11 +974,11 @@ class AnalyzeTrio():
   def nonsyn_native(self, variant, nonref_seqs):
     # what transcripts overlap this variant
     enst_overlap = [x["name"] for x in self.c.execute(
-      "SELECT name FROM ensGene WHERE bin IN (%s) AND chrom = '%s' AND " \
-      "cdsStart <= %s AND %s <= cdsEnd" % (self.region2bin(variant["pos"],
+      "SELECT name FROM ensGene WHERE chrom = '%s' AND bin IN (%s) AND " \
+      "cdsStart <= %s AND %s <= cdsEnd" % (variant["chrom"],
+                                           self.region2bin(variant["pos"],
                                                            variant["pos"] + 1,
                                                            True),
-                                           variant["chrom"],
                                            variant["pos"],
                                            variant["pos"])).fetchall()]
 
@@ -1044,11 +1032,9 @@ class AnalyzeTrio():
       self.local_af = self.af_from_vcf(self.vcf_file)
 
     global_af_db = self.c.execute(
-      "SELECT allele, af FROM evs_pos, evs_alleles WHERE evs_pos.evs_pos_id = " \
-      "evs_alleles.evs_pos_id AND evs_pos.chrom = '%s' AND " \
-      "evs_pos.pos = '%s'" %
+      "SELECT allele, af FROM evs_pos, evs_alleles WHERE evs_pos.chrom = '%s' AND " \
+      "evs_pos.pos = '%s' AND evs_pos.evs_pos_id = evs_alleles.evs_pos_id" %
       (variant["chrom"], variant["pos"])).fetchall()
-
     global_af = {}
 
     for row in global_af_db:
@@ -1077,9 +1063,6 @@ class AnalyzeTrio():
   ##
 
   def go_gene(self):
-    # raw scores for network placement
-    #self.score_all_genes(self.mk_subgraph())
-
     # how many recessive, dominant, and comphet models are there
     mendel_counts = {}
 
@@ -1092,18 +1075,15 @@ class AnalyzeTrio():
 
     # for every gene
     for gene in self.gene_names():
-      # network gene placement score
-      net_cent_perc, net_nn_perc = self.score_gene_percentile(gene)
+      # gene network placement
+      cent_perc, nn_perc = self.c.execute("SELECT net_cent_perc, net_nn_perc " \
+        "FROM gene_tests WHERE gene_name = '%s'" % gene).fetchone()
 
-#      self.c.execute(
-#        "UPDATE gene_tests SET net_cent_perc = '%s', net_nn_perc = '%s' WHERE " \
-#        "gene_name = '%s'" % (net_cent_perc, net_nn_perc, gene)) 
-
-      # for every transcript that belongs to this gene
+      # every tx that belongs to this gene
       gene_tx = [x["enst"] for x in self.c.execute(
         "SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % gene).fetchall()]
 
-      print "gene: %s\n  cent: %s\n  nn:   %s" % (gene, net_cent_perc, net_nn_perc)
+      print "gene: %s\n  cent: %s\n  nn:   %s" % (gene, cent_perc, nn_perc)
 
       all_tx_scores = []
 
@@ -1152,10 +1132,13 @@ class AnalyzeTrio():
 
           model_score["mendel"] = self.newell_ikeda(1, ni_lambda, ni_T, 1)
 
-          #TODO: add score for VCF QVs
-
-          # allele frequency and non-synonymous
+          # allele frequency, QVs, and non-synonymous
           for i in m:
+            m[i]["qv"] = self.c.execute(
+              "SELECT %s FROM variant_tests WHERE variant_id = '%s' AND allele = '%s'" %
+              (", ".join(["%s_QV" for x in self.stripped_samples]),
+               m[i]["varid"], m[i]["allele"])).fetchone()
+
             m[i]["l_af"], m[i]["g_af"] = self.c.execute(
               "SELECT local_af, global_af FROM variant_tests WHERE " \
               "variant_id = '%s' AND allele = '%s'" %
@@ -1171,6 +1154,7 @@ class AnalyzeTrio():
           model_score["nonsyn"] = sum([1 for x in m.values() if x["nonsyn"]]) / float(len(m))
           model_score["local_af"] = reduce(lambda x, y: x*y, [x["l_af"] for x in m.values()])
           model_score["global_af"] = reduce(lambda x, y: x*y, [x["g_af"] for x in m.values()])
+          model_score["qv"] = reduce(lambda x, y: x*y, [x["qv"] for x in m.values()])
 
           all_model_scores.append((self.wsm(model_score), model_score))
 
@@ -1183,8 +1167,8 @@ class AnalyzeTrio():
       else:
         best_tx_score = sorted(all_tx_scores, key=lambda x: x[0])[-1][1]
 
-      best_tx_score["net_cent"] = net_cent_perc
-      best_tx_score["net_nn"] = net_nn_perc
+      best_tx_score["net_cent"] = cent_perc
+      best_tx_score["net_nn"] = nn_perc
 
       gene_score = self.wsm(best_tx_score)
 
