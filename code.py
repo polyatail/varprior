@@ -216,6 +216,7 @@ class AnalyzeTrio():
       c.execute("CREATE INDEX IF NOT EXISTS gene_tests_gene_name ON gene_tests(gene_name);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_tests_variant_id_allele ON variant_tests(variant_id, allele);")
       c.execute("CREATE INDEX IF NOT EXISTS variant_nonsyn_variant_id ON variant_nonsyn(variant_id);")
+      c.execute("CREATE INDEX IF NOT EXISTS enst_tx_mendel ON tx_mendel(enst);")
 
       new_db = True
 
@@ -572,7 +573,7 @@ class AnalyzeTrio():
     if len(set(child[0])) == 1 and \
        len(set(mother[0])) == 2 and \
        len(set(father[0])) == 2:
-      return (True, (child[0][0]))
+      return (True, (child[0][0],))
 
     return (False, None)
 
@@ -581,11 +582,11 @@ class AnalyzeTrio():
     # one or both alleles in child must not be in either parent
     if (child[0][0] not in mother[0] and \
         child[0][0] not in father[0]):
-      return (True, (child[0][0]))
+      return (True, (child[0][0],))
 
     if (child[0][1] not in mother[0] and \
         child[0][1] not in father[0]):
-      return (True, (child[0][1]))
+      return (True, (child[0][1],))
 
     return (False, None)
 
@@ -1118,18 +1119,18 @@ gene:  %s
       for tx in gene_tx:
         print "    tx: %s" % tx
 
-        # fetch exon size for this transcript
-        exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in self.c.execute(
-          "SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % tx).fetchone()]
-
-        exon_size = sum([(x - y) for x, y in zip(exonEnds, exonStarts)])
-
         # fetch every inheritance model in this transcript
         tx_models = self.c.execute(
           "SELECT * FROM tx_mendel WHERE enst = '%s'" % tx).fetchall()
 
         if len(tx_models) == 0:
           continue
+
+        # fetch exon size for this transcript
+        exonStarts, exonEnds = [map(int, x.split(",")[:-1]) for x in self.c.execute(
+          "SELECT exonStarts, exonEnds FROM ensGene WHERE name = '%s'" % tx).fetchone()]
+
+        exon_size = sum([(x - y) for x, y in zip(exonEnds, exonStarts)])
 
         # fetch non-synonymous variants for this tx
         tx_nonsyn = self.c.execute(
@@ -1144,14 +1145,15 @@ gene:  %s
         all_model_scores = []
 
         for model in tx_models:
-          print "      model: %s,%s,%s" % (model["model"], model["varid1"], model["varid2"])
+          print "      model: %s,%s=%s,%s=%s" % (model["model"], model["varid1"],
+            model["allele1"], model["varid2"], model["allele2"])
 
           model_score = {}
 
           m = {0: {"varid": model["varid1"],
                    "allele": model["allele1"]}}
 
-          if model["varid2"]:
+          if model["varid2"] != "NULL":
             m[1] = {"varid": model["varid2"],
                     "allele": model["allele2"]}
 
@@ -1162,10 +1164,10 @@ gene:  %s
 
           # allele frequency, QVs, phastcons, and non-synonymous
           for i in m:
-            m[i]["qv"] = self.c.execute(
-              "SELECT %s FROM variant_tests WHERE variant_id = '%s' AND allele = '%s'" %
-              (", ".join(["%s_QV" for x in self.stripped_samples]),
-               m[i]["varid"], m[i]["allele"])).fetchone()
+            m[i]["qv"] = [float(x) for x in self.c.execute(
+              "SELECT %s FROM variants WHERE variant_id = '%s'" %
+              (", ".join(["%s_QV" % x for x in self.stripped_samples]),
+               m[i]["varid"])).fetchone()]
 
             #TODO: pull phastcons for this variant from evs_pos table
 
@@ -1184,7 +1186,7 @@ gene:  %s
           model_score["nonsyn"] = sum([1 for x in m.values() if x["nonsyn"]]) / float(len(m))
           model_score["local_af"] = reduce(lambda x, y: x*y, [x["l_af"] for x in m.values()])
           model_score["global_af"] = reduce(lambda x, y: x*y, [x["g_af"] for x in m.values()])
-          model_score["qv"] = reduce(lambda x, y: x*y, [x["qv"] for x in m.values()])
+          model_score["qv"] = reduce(lambda x, y: x*y, sum([x["qv"] for x in m.values()], []))
 
           all_model_scores.append((self.wsm(model_score), model_score))
 
