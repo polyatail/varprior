@@ -59,8 +59,8 @@ def score_gene(gene, graph, top_genes):
 
 def load_trio():
   globals()["a"] = AnalyzeTrio(
-    {"mother": "jp-scid7b", "father": "jp-scid7c", "child": "jp-scid7a"},
-    "male",
+    {"mother": "jp-scid9b", "father": "jp-scid9c", "child": "jp-scid9a"},
+    "female",
     "varprior.db",
     "varprior.gpickle",
     "data/hg19.fa",
@@ -128,11 +128,11 @@ class AnalyzeTrio():
       self.load_annotation(ensgene_file, enst_to_gene_name_file,
                            string_alias_file)
 
-      sys.stderr.write("loading vcf\n")
-      self.load_trio_vcf(vcf_file)
-
       sys.stderr.write("loading evs data\n")
       self.load_evs(evs_file)
+
+    sys.stderr.write("loading vcf\n")
+    self.load_trio_vcf(vcf_file)
 
     if os.path.isfile(network_pickle):
       sys.stderr.write("loading network (pickle)\n")
@@ -346,8 +346,7 @@ class AnalyzeTrio():
           col_data = dict(zip(f_names, f_data))
           col_data["GT"] = reduce(lambda x, y: x.replace(y, code[y]), code, col_data["GT"]).split("/", 1)
 
-          if "." in col_data["GT"] and \
-             chrom != "chrY":
+          if "." in col_data["GT"]:
             break
 
           sample_to_data[sample] = col_data
@@ -713,7 +712,7 @@ class AnalyzeTrio():
       # exon contains coding start
       elif start <= cdsStart < end:
         coding_exons.append((cdsStart, end))
-        break
+        continue
       # exon contains coding end
       elif start <= cdsEnd < end:
         coding_exons.append((start, cdsEnd))
