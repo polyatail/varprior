@@ -154,13 +154,12 @@ class AnalyzeTrio():
       c.execute("INSERT INTO metadata VALUES ('records', '-1')")
       c.execute("INSERT INTO metadata VALUES ('variants', '-1')")
 
-      c.execute("CREATE INDEX IF NOT EXISTS ensp_index ON ensp_to_enst(ensp);")
-      c.execute("CREATE INDEX IF NOT EXISTS enst_index ON enst_to_gene_name(enst);")
-      c.execute("CREATE INDEX IF NOT EXISTS gene_name_index ON enst_to_gene_name(gene_name);")
-      c.execute("CREATE INDEX IF NOT EXISTS gene_name_index2 ON gene_tests(gene_name);")
-      c.execute("CREATE INDEX IF NOT EXISTS variant_id_index2 ON variant_tests(variant_id);")
-      c.execute("CREATE INDEX IF NOT EXISTS variant_id_index3 ON variant_nonsyn(variant_id);")
-      c.execute("CREATE INDEX IF NOT EXISTS allele_index ON variant_tests(allele);")
+      c.execute("CREATE INDEX IF NOT EXISTS ensp_ensp_to_enst ON ensp_to_enst(ensp);")
+      c.execute("CREATE INDEX IF NOT EXISTS enst_enst_to_gene_name ON enst_to_gene_name(enst);")
+      c.execute("CREATE INDEX IF NOT EXISTS gene_name_enst_to_gene_name ON enst_to_gene_name(gene_name);")
+      c.execute("CREATE INDEX IF NOT EXISTS gene_tests_gene_name ON gene_tests(gene_name);")
+      c.execute("CREATE INDEX IF NOT EXISTS variant_tests_variant_id_allele ON variant_tests(variant_id, allele);")
+      c.execute("CREATE INDEX IF NOT EXISTS variant_nonsyn_variant_id ON variant_nonsyn(variant_id);")
 
       new_db = True
 
@@ -381,8 +380,8 @@ class AnalyzeTrio():
     s_time = time.time()
     processed = 0
 
-    for chrom in evs:
-      for pos in evs[chrom]:
+    for chrom in sorted(evs.keys()):
+      for pos in sorted(evs[chrom].keys()):
         self.c.execute(
           "INSERT INTO evs_pos (chrom, pos, phastcons) VALUES " \
           "('%s', %s, %s)" % (chrom, pos, evs[chrom][pos]["phastcons"]))
@@ -873,7 +872,7 @@ class AnalyzeTrio():
 
     gene_to_scores = {}
 
-    for gene in self.gene_names()
+    for gene in self.gene_names():
       dist_to_top_genes = []
  
       if gene not in graph or \
@@ -1231,8 +1230,7 @@ gene:  %s
 
     for variant in self.variants():
       # what are the non-reference alleles?
-      all_seqs = set(filter(lambda x: x != ".",
-        [variant["%s%s" % (x, y)] for x in self.stripped_samples for y in ("_1", "_2")]))
+      all_seqs = set([variant["%s%s" % (x, y)] for x in self.stripped_samples for y in ("_1", "_2")])
       nonref_seqs = all_seqs.difference(
         self.pyf_genome[variant["chrom"]][variant["pos"]])
 
