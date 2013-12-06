@@ -572,7 +572,7 @@ class AnalyzeTrio():
     return (False, None)
 
   @staticmethod
-  def _mf_xlinked(mother, father, son):
+  def _mf_xlinked(mother, father, child):
     # at least one reported allele in son must not be in father and be present
     # no more than once in the mother
     for c in child[0]:
