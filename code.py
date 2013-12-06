@@ -19,6 +19,8 @@ from networkx.exception import NetworkXNoPath
 import tempfile
 import subprocess
 
+NUM_PROCS = 10
+
 ##
 ## GENE NETWORK SCORE FUNCTION -- MUST BE OUTSIDE CLASS FOR MP
 ##
@@ -924,14 +926,14 @@ class AnalyzeTrio():
     # harmonic centrality defines how well connected a gene is all puck genes
     # nearest-neighobr defines how close a gene is to its nearest puck gene
 
-    p = Pool(5)
+    p = Pool(NUM_PROCS)
     partial_score_gene = partial(score_gene, graph=graph, top_genes=self.top_genes)
     result = p.map(partial_score_gene, self.gene_names())
     p.close()
 
     # and now go through and convert them all to percentiles
-    cent_hist = numpy.array([x[1] for x in result])
-    nn_hist = numpy.array([x[2] for x in result])
+    cent_hist = numpy.array([x[1] for x in result if x[1] != -1])
+    nn_hist = numpy.array([x[2] for x in result if x[2] != -1])
 
     batch = []
 
@@ -1158,12 +1160,14 @@ gene:  %s
 
           model_score["mendel"] = self.newell_ikeda(1, ni_lambda, ni_T, 1)
 
-          # allele frequency, QVs, and non-synonymous
+          # allele frequency, QVs, phastcons, and non-synonymous
           for i in m:
             m[i]["qv"] = self.c.execute(
               "SELECT %s FROM variant_tests WHERE variant_id = '%s' AND allele = '%s'" %
               (", ".join(["%s_QV" for x in self.stripped_samples]),
                m[i]["varid"], m[i]["allele"])).fetchone()
+
+            #TODO: pull phastcons for this variant from evs_pos table
 
             m[i]["l_af"], m[i]["g_af"] = self.c.execute(
               "SELECT local_af, global_af FROM variant_tests WHERE " \
