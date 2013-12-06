@@ -343,7 +343,8 @@ class AnalyzeTrio():
           col_data = dict(zip(f_names, f_data))
           col_data["GT"] = reduce(lambda x, y: x.replace(y, code[y]), code, col_data["GT"]).split("/", 1)
 
-          if "." in col_data["GT"]:
+          if "." in col_data["GT"] and \
+             chrom != "chrY":
             break
 
           sample_to_data[sample] = col_data
