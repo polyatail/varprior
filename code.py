@@ -59,8 +59,7 @@ def score_gene(gene, graph, top_genes):
 
 def load_trio():
   globals()["a"] = AnalyzeTrio(
-    ("jp-scid7a", "jp-scid7b", "jp-scid7c"),
-    {"mother": "jp-scid7a", "father": "jp-scid7b", "child": "jp-scid7c"},
+    {"mother": "jp-scid7b", "father": "jp-scid7c", "child": "jp-scid7a"},
     "varprior.db",
     "varprior.gpickle",
     "data/hg19.fa",
@@ -74,7 +73,7 @@ def load_trio():
 ##
 
 class AnalyzeTrio():
-  def __init__(self, sample_names, pedigree, varprior_db, network_pickle,
+  def __init__(self, pedigree, varprior_db, network_pickle,
                genome_fasta, vcf_file = None, ensgene_file = None,
                enst_to_gene_name_file = None, string_alias_file = None,
                string_links_file = None, evs_file = None):
@@ -98,8 +97,8 @@ class AnalyzeTrio():
     self.global_vcf = "data/AFR.2of4intersection_allele_freq" \
                       ".20100804.genotypes.vcf.gz"
 
-    self.sample_names = sample_names
-    self.stripped_samples = [x.replace("-", "") for x in sample_names]
+    self.sample_names = pedigree.values()
+    self.stripped_samples = [x.replace("-", "") for x in pedigree.values()]
 
     self.varprior_db = varprior_db
     self.network_pickle = network_pickle
