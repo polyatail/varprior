@@ -80,7 +80,7 @@ class AnalyzeTrio():
                string_links_file = None, evs_file = None):
     self.weights = {"mendel": 1,
                     "nonsyn": 1,
-                    "qv": 1,
+                    "qv": 1 / 970299.0,
                     "global_af": 1,
                     "local_af": 1,
                     "net_cent": 1,
@@ -1153,7 +1153,7 @@ gene:  %s
           m = {0: {"varid": model["varid1"],
                    "allele": model["allele1"]}}
 
-          if model["varid2"] != "NULL":
+          if model["varid2"]:
             m[1] = {"varid": model["varid2"],
                     "allele": model["allele2"]}
 
@@ -1239,8 +1239,8 @@ gene:  %s
             varid2 = result[0][1]
             allele2 = result[1][1]
           else:
-            varid2 = "NULL"
-            allele2 = "NULL"
+            varid2 = None
+            allele2 = None
  
           batch.append((enst, test, varid1, allele1, varid2, allele2))
 
