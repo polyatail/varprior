@@ -45,6 +45,8 @@ class VariantData:
     self._c = self._conn.cursor()
 
   def db_init(self):
+    assert self._conn, self._c
+
     tables = {}
 
     tables["metadata"] = {"f": (("k", "text"),
@@ -147,6 +149,8 @@ class VariantData:
     self._conn.commit()
 
   def db_metadata(self, action):
+    assert self._conn, self._c
+
     md = {"version": ("l", self.version),
           "transcripts": ("q", "SELECT COUNT(*) FROM transcripts"),
           "proteins": ("q", "SELECT COUNT(*) FROM proteins"),
@@ -195,10 +199,10 @@ class VariantData:
     eg_cols = ("name", "txStart", "txEnd", "exonStarts", "exonEnds", "cdsStart", "cdsEnd")
     p_cols = ", ".join(["?" for _ in db_cols])
 
-    for l in open(ensgene_file, "r"):                                        
-      l = l.strip().split()                                         
-                                                                                
-      if processed == 0:                                                        
+    for l in open(ensgene_file, "r"):
+      l = l.strip().split()
+
+      if processed == 0:
         ensgene_keys = l
       else:
         vals = dict(zip(ensgene_keys, l))
@@ -256,7 +260,7 @@ class VariantData:
   def load_evs(self, evs_file):
     assert self._conn, self._c
 
-    evs = dict([(x, {}) for x in self.pyf_genome.keys()])
+    evs = {}
 
     s_time = time.time()
     processed = 0
@@ -272,6 +276,11 @@ class VariantData:
 
       #NOTE: here we convert 1-based to 0-based position
       pos = int(pos) - 1
+
+      try:
+        evs[chrom]
+      except KeyError:
+        evs[chrom] = {}
 
       try:
         evs[chrom][pos]
@@ -352,7 +361,9 @@ class VariantData:
     sys.stderr.write("\n")
 
   def load_dbnsfp(self, dbnsfp_file):
-    dbnsfp = dict([(x, {}) for x in self.pyf_genome.keys()])
+    assert self._conn, self._c
+
+    dbnsfp = {}
 
     s_time = time.time()
     processed = 0
@@ -366,6 +377,11 @@ class VariantData:
       #NOTE: here we convert 1-based to 0-based position
       pos = int(l[1]) - 1
       chrom = "chr%s" % l[0]
+
+      try:
+        dbnsfp[chrom]
+      except KeyError:
+        dbnsfp[chrom] = {}
 
       try:
         dbnsfp[chrom][pos]
@@ -482,7 +498,22 @@ class VariantData:
     self.conn.commit()
     sys.stderr.write("\n")
 
+  def find_var_overlapping_tx(self):
+    assert self._conn, self._c
+
+    all_tx = self._c.execute("SELECT tx_id, chrom, txStart, txEnd FROM transcripts").fetchall()
+
+    for tx_id, chrom, tx_start, tx_end in all_tx:
+      all_vars = self._c.execute("SELECT variant_id FROM variants WHERE " \
+        "chrom = '%s' AND pos BETWEEN %s AND %s" % (chrom, tx_start, tx_end)).fetchall()
+
+      batch = [(tx_id, x["variant_id"]) for x in all_vars]
+
+      self._c.executemany("INSERT INTO tx_to_variant (tx_id, variant_id) VALUES (?, ?)", batch)
+
   def fetch_gene(self, gene_name = None, gene_id = None):
+    assert self._conn, self._c
+
     if not (gene_name ^ gene_id):
       raise ValueError("Must specify either gene_name or gene_id")
 
@@ -506,8 +537,10 @@ class VariantData:
       t = self.fetch_tx(tx_id=tx_id["tx_id"])
 
       g.transcripts[t["name"]] = t
- 
+
   def fetch_tx(self, tx_name = None, tx_id = None):
+    assert self._conn, self._c
+
     if not (tx_name ^ tx_id):
       raise ValueError("Must specify either tx_name or tx_id")
 
@@ -539,6 +572,8 @@ class VariantData:
     return t
 
   def fetch_protein(self, protein_name = None, protein_id = None):
+    assert self._conn, self._c
+
     if not (protein_name ^ protein_id):
       raise ValueError("Must specify either protein_name or protein_id")
 
@@ -552,11 +587,245 @@ class VariantData:
     return p
 
   def fetch_variant(self, chrom = None, pos = None, variant_id = None):
-    if not (chrom and pos) and \
-       not variant_id:
+    assert self._conn, self._c
+
+    if not ((chrom and pos) ^ variant_id):
       raise ValueError("Must specify either chrom and pos or variant_id")
 
+    if variant_id:
+      d = self._c.execute("SELECT * FROM variants WHERE variant_id = %s" % variant_id).fetchone()
+    elif chrom and pos:
+      d = self._c.execute("SELECT * FROM variants WHERE chrom = '%s' AND pos = %s" % (chrom, pos)).fetchone()
+
+    v = Variant(d["variant_id"])
+
+    v.chrom = d["chrom"]
+    v.pos = d["pos"]
+    v.phylop = d["phylop"]
+    v.siphy = d["siphy"]
+
+    v.alleles = {}
+
+    all_alleles = self._c.execute("SELECT allele_id FROM alleles WHERE variant_id = '%s'" % v.variant_id).fetchall()
+
+    for allele_id in all_alleles:
+      a = self.fetch_allele(allele_id=allele_id["allele_id"])
+
+      v.alleles[a["sequence"]] = a
+
+    return v
+
   def fetch_allele(self, chrom = None, pos = None, seq = None, allele_id = None):
-    if not (chrom and pos and seq) and \
-       not allele_id:
+    assert self._conn, self._c
+
+    if not ((chrom and pos and seq) ^ allele_id):
       raise ValueError("Must specify either chrom, pos and seq or allele_id")
+
+    if allele_id:
+      d = self._c.execute("SELECT * FROM alleles WHERE allele_id = %s" % allele_id).fetchone()
+    elif chrom and pos and seq:
+      d = self._c.execute("SELECT * FROM alleles WHERE chrom = '%s' AND pos = %s AND seq = '%s'" % (chrom, pos, seq)).fetchone()
+
+    a = Allele(d["allele_id"])
+
+    a.variant_id = d["variant_id"]
+    a.sequence = d["sequence"]
+    a.evs_af = d["evs_af"]
+    a.tgp_af = d["tgp_af"]
+    a.polyphen_hdiv = d["polyphen_hdiv"]
+    a.polyphen_hvar = d["polyphen_hvar"]
+    a.mut_taster = d["mut_taster"]
+    a.mut_assessor = d["mut_assessor"]
+
+    return a
+
+  def gene_names(self):
+    assert self._conn, self._c
+
+    genes = self._c.execute("SELECT name FROM genes").fetchall()
+
+    for g in genes:
+      yield g["name"]
+
+  def protein_to_gene(self, protein_name):
+    assert self._conn, self._c
+
+    genes = self._c.execute("SELECT genes.name AS g FROM genes, proteins, " \
+      "protein_to_tx, gene_to_tx WHERE proteins.name = '%s' AND " \
+      "proteins.protein_id = protein_to_tx.protein_id AND " \
+      "protein_to_tx.tx_id = gene_to_tx.tx_id AND " \
+      "genes.gene_id = gene_to_tx.gene_id GROUP BY g").fetchall()
+    genes = [x["g"] for x in genes]
+
+    return genes
+
+class GeneNetwork:
+  def __init__(self, var_data):
+    self.vd = var_data
+
+    self.network_score_cutoff = 677
+    self.top_genes = ["ADAMTS8", "AIRE", "AK2", "ATM", "BTK", "CD247", "CD3D",
+                      "CD3G", "CD40LG", "CD8A", "CD8B", "CHD7", "CIITA",
+                      "CORO1A", "CYBB", "DCLRE1C", "DKC1", "DOCK8", "FOXN1",
+                      "IKBKG", "IL2RA", "IL2RG", "IL7R", "ITK", "JAK3", "LCK",
+                      "LIG4", "NBN", "NHEJ1", "ORAI1", "PNPLA2", "PRKDC",
+                      "PTPRC", "RAG1", "RAG2", "RFXANK", "SH2D1A", "STAT5B",
+                      "STIM1", "TAP1", "TAP2", "TAPBP", "TBX1", "WAS", "XIAP",
+                      "ZAP70", "ZBTB1"]
+
+  def load_string_network(self, string_network_links):
+    # NOTE: scores are 1000 - the score so we can use shortest path algorithms
+    # NOTE: no multigraph -- instead update to keep edge weights minimum
+
+    # generate STRING graph with gene names
+    gene_graph = networkx.Graph(directed=False)
+    sys.stderr.write("    nodes\n")
+    gene_graph.add_nodes_from(self.vd.gene_names())
+
+    links = [x.strip().split() for x in open(string_network_links)]
+
+    for line_num, line in enumerate(links):
+      if float(line[2]) < self.network_score_cutoff:
+        continue
+
+      gene1 = self.vd.protein_to_gene(line[0][5:])
+      gene2 = self.vd.protein_to_gene(line[1][5:])
+
+      for node1, node2 in itertools.product(gene1, gene2):
+        weight = 1000 - float(line[2])
+
+        try:
+          if gene_graph[node1][node2]["weight"] > weight:
+            gene_graph[node1][node2]["weight"] = weight
+            continue
+        except KeyError:
+          gene_graph.add_edge(node1, node2, weight=weight)
+
+          if line_num % 100 == 0:
+            num_stars = int(math.ceil(line_num / float(len(links)) * 10))
+            progress = ["*"] * num_stars + [" "] * (10 - num_stars)
+
+            sys.stderr.write("\r    edges [%s]" % "".join(progress))
+
+    sys.stderr.write("\n")
+
+    self.gene_graph = gene_graph
+
+  def mk_subgraph(self):
+    # return subgraph induced by top genes and their first-degree neighbors
+    neighbors = list(itertools.chain(*[self.gene_graph.neighbors(x) for x in self.top_genes]))
+    subgraph = self.gene_graph.subgraph(neighbors + self.top_genes)
+
+    return subgraph
+
+  @staticmethod
+  def find_connected_genes(node_list, max_depth, graph):
+    # find genes within n connections of given gene
+    assert isinstance(node_list, list)
+
+    connected_nodes = []
+
+    # depth-limited search
+    def _dls(node, depth):
+      if depth == 0:
+        return
+
+      for neighbor_node in graph.neighbors(node):
+        connected_nodes.append(neighbor_node)
+        _dls(neighbor_node, depth - 1)
+
+    for gene in gene_list:
+      _dls(gene, max_depth)
+
+    return set(connected_nodes)
+
+  def plot_network(self):
+    neighbors = list(itertools.chain(*[self.gene_graph.neighbors(x) for x in self.top_genes]))
+    subgraph = self.gene_graph.subgraph(neighbors + self.top_genes)
+    pos = networkx.graphviz_layout(subgraph, prog="neato")
+    labels = dict(zip(neighbors + sys.argv[2:], neighbors + self.top_genes))
+
+    networkx.draw_networkx_nodes(subgraph, pos, nodelist=neighbors, node_color="#fdb462")
+    networkx.draw_networkx_nodes(subgraph, pos, nodelist=self.top_genes, node_color="#80b1d3")
+
+    networkx.draw_networkx_edges(subgraph, pos, alpha=0.1)
+
+    networkx.draw_networkx_labels(subgraph, pos, labels)
+
+    plt.figure(1, figsize=(16, 16))
+    plt.axis("off")
+    plt.show()
+
+  @staticmethod
+  def score_gene(gene, graph, top_genes):
+    if gene not in graph or \
+       graph.degree(gene) == 0:
+      harmonic_centrality = -1
+      nearest_neighbor = -1
+    else:
+      dist_to_top_genes = []
+
+      # shortest path by weight to each of top genes
+      for top_gene in top_genes:
+        if top_gene == gene:
+          continue
+
+        try:
+          path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
+        except (NetworkXNoPath, KeyError):
+          continue
+
+        weights = []
+
+        for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
+          weights.append(graph[node_from][node_to]["weight"])
+
+        dist_to_top_genes.append(float(sum(weights)))
+
+      harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
+      nearest_neighbor = sorted(dist_to_top_genes)[0]
+
+      print "gene:  %s\n  c:   %s\n  n:   %s" % (gene, harmonic_centrality, nearest_neighbor)
+
+    return (gene, harmonic_centrality, nearest_neighbor)
+
+  def score_all_genes(self, graph):
+    # two scores:
+    # harmonic centrality defines how well connected a gene is all puck genes
+    # nearest-neighobr defines how close a gene is to its nearest puck gene
+    p = Pool(NUM_PROCS)
+    partial_score_gene = partial(self.score_gene, graph=graph, top_genes=self.top_genes)
+    result = p.map(partial_score_gene, self.gene_names())
+    p.close()
+
+    # and now go through and convert them all to percentiles
+    cent_hist = numpy.array([x[1] for x in result if x[1] != -1])
+    nn_hist = numpy.array([x[2] for x in result if x[2] != -1])
+
+    batch = []
+
+    for gene, cent_score, nn_score in result:
+      # edge case: gene is a top gene
+      if gene in self.top_genes:
+        cent_perc = 1
+        nn_perc = 1
+      # edge case: gene isn't in network
+      elif cent_score == -1 or \
+           nn_score == -1:
+        cent_perc = 0
+        nn_perc = 0
+      else:
+        cent_perc = scipy.stats.percentileofscore(cent_hist, cent_score) / 100.0
+        nn_perc = 1 - scipy.stats.percentileofscore(nn_hist, nn_score) / 100.0
+
+        print """
+gene:  %s
+  c:   %s
+  c_p: %s
+  n:   %s
+  n_p: %s
+""" % (gene, cent_score, cent_perc, nn_score, nn_perc)
+
+      batch.append((gene, cent_score, cent_perc, nn_score, nn_perc))
+
+    return batch
