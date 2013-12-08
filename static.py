@@ -264,6 +264,9 @@ class VariantData:
       chrom, pos = l[0].split(":")
       chrom = "chr%s" % chrom
 
+      #NOTE: here we convert 1-based to 0-based position
+      pos = int(pos) - 1
+
       try:
         evs[chrom][pos]
       except KeyError:
@@ -342,8 +345,136 @@ class VariantData:
     self.conn.commit()
     sys.stderr.write("\n")
 
-  def load_dbnsfp(self):
-    pass
+  def load_dbnsfp(self, dbnsfp_file):
+    dbnsfp = dict([(x, {}) for x in self.pyf_genome.keys()])
+
+    s_time = time.time()
+    processed = 0
+
+    for l in open(dbnsfp_file):
+      if l.startswith("#"):
+        continue
+
+      l = l.strip().split()
+
+      #NOTE: here we convert 1-based to 0-based position
+      pos = int(l[1]) - 1
+      chrom = "chr%s" % l[0]
+
+      try:
+        dbnsfp[chrom][pos]
+      except KeyError:
+        dbnsfp[chrom][pos] = {}
+
+      try:
+        dbnsfp[chrom][pos]["phylop"] = float(l[34])
+      except ValueError:
+        dbnsfp[chrom][pos]["phylop"] = -1
+
+      try:
+        dbnsfp[chrom][pos]["siphy"] = float(l[36])
+      except ValueError:
+        dbnsfp[chrom][pos]["siphy"] = -1
+
+      try:
+        dbnsfp[chrom][pos]["alleles"]
+      except KeyError:
+        dbnsfp[chrom][pos]["alleles"] = {}
+
+      try:
+        dbnsfp[chrom][pos]["alleles"][l[3]]
+      except KeyError:
+        dbnsfp[chrom][pos]["alleles"][l[3]] = {"tx": l[19].split(";"),
+                                               "mut": "".join([l[4], l[20], l[5])}
+
+        try:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["tgp_af"] = float(l[40])
+        except KeyError:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["tgp_af"] = -1
+
+        try:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["pp_hdiv"] = float(l[22])
+        except KeyError:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["pp_hdiv"] = -1
+
+        try:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["pp_hvar"] = float(l[24])
+        except KeyError:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["pp_hvar"] = -1
+
+        try:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["mut_taster"] = float(l[28])
+        except KeyError:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["mut_taster"] = -1
+
+        try:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["mut_assessor"] = float(l[30])
+        except KeyError:
+          dbnsfp[chrom][pos]["alleles"][l[3]]["mut_assessor"] = -1
+
+      processed += 1
+      if processed % 100 == 0:
+        sys.stderr.write("\rloaded %s @ %.02f/s" %
+          (processed, processed / (time.time() - s_time)))
+
+    sys.stderr.write("\n")
+    s_time = time.time()
+    processed = 0
+
+    for chrom in sorted(dbnsfp.keys()):
+      for pos in sorted(dbnsfp[chrom].keys()):
+        d = dbnsfp[chrom[pos]]
+
+        variant_id = self._c.execute("SELECT variant_id FROM variants WHERE " \
+          "chrom = '%s' AND pos = '%s'" % (chrom, pos)).fetchone()
+
+        if variant_id == None:
+          self._c.execute("INSERT INTO variants (chrom, pos, phylop, siphy) VALUES " \
+            "('%s', %s, %s)" % (chrom, pos, d["phylop"], d["siphy"]))
+
+          variant_id = self._c.lastrowid
+        else:
+          variant_id = variant_id[0]
+
+          self._c_.execute("UPDATE variants SET phylop = '%s', siphy = '%s' WHERE " \
+            "variant_id = '%s'" % (d["phylop"], d["siphy"], variant_id))
+
+        for allele in d["alleles"]:
+          d_a = d[allele]
+
+          allele_id = self._c.execute("SELECT allele_id FROM alleles WHERE " \
+            "variant_id = %s AND sequence = '%s'" % (variant_id, allele)).fetchone()
+
+          if allele_id == None:
+            self._c.execute("INSERT INTO alleles (variant_id, sequence, tgp_af, " \
+              "polyphen_hdiv, polyphen_hvar, mut_taster, mut_assessor) VALUES " \
+              "(%s, '%s', %s, %s, %s, %s, %s)" % (variant_id, allele,
+              d_a["tgp_af"], d_a["polyphen_hdiv"], d_a["polyphen_hvar"],
+              d_a["mut_taster"], d_a["mut_assessor"]))
+
+            allele_id = self._c.lastrowid
+          else:
+            allele_id = allele_id[0]
+
+            self._c.execute("UPDATE alleles SET tgp_af = '%s', polyphen_hdiv = '%s' " \
+              "polyphen_hvar = '%s', mut_taster = '%s', mut_assessor = '%s' " \
+              "WHERE allele_id = %s" % (allele_id, d_a["tgp_af"], d_a["polyphen_hdiv"],
+              d_a["polyphen_hvar"], d_a["mut_taster"], d_a["mut_assessor"]))
+
+          for tx in d_a["tx"]:
+            tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = '%s'" % tx).fetchone()[0]
+
+            self._c.execute("INSERT INTO muts (allele_id, tx_id, mut) VALUES " \
+              "(%s, %s, '%s')" % (allele_id, tx_id, d_a["mut"]))
+
+        processed += 1
+        if processed % 100 == 0:
+          self.conn.commit()
+          sys.stderr.write("\rinserted %s @ %.02f/s" %
+            (processed, processed / (time.time() - s_time)))
+
+    self.conn.commit()
+    sys.stderr.write("\n")
 
   def fetch_gene(self, gene_name = None, gene_id = None):
     if not gene_name and \
