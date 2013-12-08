@@ -1,3 +1,11 @@
+from multiprocessing import Pool
+import numpy
+import scipy.stats
+import time
+import itertools
+import os
+import sys
+import networkx
 import sqlite3
 
 # there should be a framework for accessing all this data that doesn't involve
@@ -407,7 +415,7 @@ class VariantData:
         dbnsfp[chrom][pos]["alleles"][l[3]]
       except KeyError:
         dbnsfp[chrom][pos]["alleles"][l[3]] = {"tx": l[19].split(";"),
-                                               "mut": "".join([l[4], l[20], l[5])}
+                                               "mut": "".join([l[4], l[20], l[5]])}
 
         try:
           dbnsfp[chrom][pos]["alleles"][l[3]]["tgp_af"] = float(l[40])
@@ -622,9 +630,11 @@ class VariantData:
       raise ValueError("Must specify either chrom, pos and seq or allele_id")
 
     if allele_id:
-      d = self._c.execute("SELECT * FROM alleles WHERE allele_id = %s" % allele_id).fetchone()
+      d = self._c.execute("SELECT * FROM alleles WHERE allele_id = %s" % 
+        allele_id).fetchone()
     elif chrom and pos and seq:
-      d = self._c.execute("SELECT * FROM alleles WHERE chrom = '%s' AND pos = %s AND seq = '%s'" % (chrom, pos, seq)).fetchone()
+      d = self._c.execute("SELECT * FROM alleles WHERE chrom = '%s' AND " \
+        "pos = %s AND seq = '%s'" % (chrom, pos, seq)).fetchone()
 
     a = Allele(d["allele_id"])
 
@@ -672,6 +682,9 @@ class GeneNetwork:
                       "PTPRC", "RAG1", "RAG2", "RFXANK", "SH2D1A", "STAT5B",
                       "STIM1", "TAP1", "TAP2", "TAPBP", "TBX1", "WAS", "XIAP",
                       "ZAP70", "ZBTB1"]
+
+  def load_string_pickle(self, gpickle):
+    self.gene_graph = networkx.read_gpickle(gpickle)
 
   def load_string_network(self, string_network_links):
     # NOTE: scores are 1000 - the score so we can use shortest path algorithms
@@ -826,6 +839,7 @@ gene:  %s
   n_p: %s
 """ % (gene, cent_score, cent_perc, nn_score, nn_perc)
 
-      batch.append((gene, cent_score, cent_perc, nn_score, nn_perc))
+      batch.append((cent_score, cent_perc, nn_score, nn_perc, gene))
 
-    return batch
+    self.vd._c.executemany("UPDATE genes SET cent_score = ?, cent_perc = ?, " \
+      "nn_score = ?, nn_perc = ? WHERE name = ?", batch)
