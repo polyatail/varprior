@@ -11,14 +11,20 @@ import sqlite3
 
 class Gene:
   # contains a bunch of transcripts
-  def __init__(self, gene_id):
+  def __init__(self, gene_id, gene_name):
     self.gene_id = gene_id
+    self.gene_name = gene_name
 
 class Transcript:
   # contains a bunch of proteins (in practice, only one)
-  # contains a bunch of variants 
-  def __init__(self, tx_id):
+  def __init__(self, tx_id, tx_name):
     self.tx_id = tx_id
+    self.tx_name = tx_name
+
+class Protein:
+  def __init__(self, protein_id, protein_name):
+    self.protein_id = protein_id
+    self.protein_name = protein_name
 
 class Variant:
   # contains a bunch of alleles
@@ -477,14 +483,73 @@ class VariantData:
     sys.stderr.write("\n")
 
   def fetch_gene(self, gene_name = None, gene_id = None):
-    if not gene_name and \
-       not gene_id:
+    if not (gene_name ^ gene_id):
       raise ValueError("Must specify either gene_name or gene_id")
 
+    if gene_id:
+      d = self._c.execute("SELECT * FROM genes WHERE gene_id = %s" % gene_id).fetchone()
+    elif gene_name:
+      d = self._c.execute("SELECT * FROM genes WHERE gene_name = %s" % gene_name).fetchone()
+
+    g = Gene(d["gene_id"], d["name"])
+
+    g.cent_score = d["cent_score"]
+    g.cent_perc = d["cent_perc"]
+    g.nn_score = d["nn_score"]
+    g.nn_perc = d["nn_perc"]
+
+    g.transcripts = {}
+
+    all_tx = self._c.execute("SELECT tx_id FROM gene_to_tx WHERE gene_id = '%s'" % g.gene_id).fetchall()
+
+    for tx_id in all_tx:
+      t = self.fetch_tx(tx_id=tx_id["tx_id"])
+
+      g.transcripts[t["name"]] = t
+ 
   def fetch_tx(self, tx_name = None, tx_id = None):
-    if not tx_name and \
-       not tx_id:
+    if not (tx_name ^ tx_id):
       raise ValueError("Must specify either tx_name or tx_id")
+
+    if tx_id:
+      d = self._c.execute("SELECT * FROM transcripts WHERE tx_id = %s" % tx_id).fetchone()
+    elif tx_name:
+      d = self._c.execute("SELECT * FROM transcripts WHERE tx_name = %s" % tx_name).fetchone()
+
+    t = Transcript(d["tx_id"], d["name"])
+
+    t.bin = d["bin"]
+    t.chrom = d["chrom"]
+    t.tx_start = d["tx_start"]
+    t.tx_end = d["tx_end"]
+    t.cds_start = d["cds_start"]
+    t.cds_end = d["cds_end"]
+    t.exon_starts = d["exon_starts"]
+    t.exon_ends = d["exon"]
+
+    t.proteins = {}
+
+    all_prot = self._c.execute("SELECT protein_id FROM protein_to_tx WHERE tx_id = %s" % t.tx_id).fetchall()
+
+    for prot_id in all_prot:
+      p = self.fetch_protein(protein_id=prot_id["protein_id"])
+
+      t.proteins[p["name"]] = p
+
+    return t
+
+  def fetch_protein(self, protein_name = None, protein_id = None):
+    if not (protein_name ^ protein_id):
+      raise ValueError("Must specify either protein_name or protein_id")
+
+    if protein_id:
+      d = self._c.execute("SELECT * FROM transcripts WHERE protein_id = %s" % protein_id).fetchone()
+    elif protein_name:
+      d = self._c.execute("SELECT * FROM transcripts WHERE protein_name = %s" % protein_name).fetchone()
+
+    p = Protein(d["protein_id"], d["name"])
+
+    return p
 
   def fetch_variant(self, chrom = None, pos = None, variant_id = None):
     if not (chrom and pos) and \
