@@ -1,66 +1,18 @@
-from multiprocessing import Pool
 import pysam
-from functools import partial
 import os
-import math
-import matplotlib.pyplot as plt
 import pyfasta
 from Bio.Seq import Seq
 from Bio.Data.CodonTable import TranslationError
 import sqlite3
 import numpy
 import scipy
-import scipy.stats
 import time
 import itertools
 import sys
-import networkx
-from networkx.exception import NetworkXNoPath
-import tempfile
-import subprocess
-
-NUM_PROCS = 10
-
-##
-## GENE NETWORK SCORE FUNCTION -- MUST BE OUTSIDE CLASS FOR MP
-##
-
-def score_gene(gene, graph, top_genes): 
-  if gene not in graph or \
-     graph.degree(gene) == 0:
-    harmonic_centrality = -1
-    nearest_neighbor = -1
-  else:
-    dist_to_top_genes = []
-
-    # shortest path by weight to each of top genes
-    for top_gene in top_genes:
-      if top_gene == gene:
-        continue
-
-      try:
-        path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
-      except (NetworkXNoPath, KeyError):
-        continue
-
-      weights = []
- 
-      for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
-        weights.append(graph[node_from][node_to]["weight"])
-
-      dist_to_top_genes.append(float(sum(weights)))
-
-    harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
-    nearest_neighbor = sorted(dist_to_top_genes)[0]
-
-    print "gene:  %s\n  c:   %s\n  n:   %s" % (gene, harmonic_centrality, nearest_neighbor)
-
-  return (gene, harmonic_centrality, nearest_neighbor)
 
 def load_trio():
   globals()["a"] = AnalyzeTrio(
-    {"mother": "jp-scid9b", "father": "jp-scid9c", "child": "jp-scid9a"},
-    "female",
+    {"mother": "jp-scid9b", "father": "jp-scid9c", "daughter": "jp-scid9a"},
     "varprior.db",
     "varprior.gpickle",
     "data/hg19.fa",
@@ -74,10 +26,8 @@ def load_trio():
 ##
 
 class AnalyzeTrio():
-  def __init__(self, pedigree, child_gender, varprior_db, network_pickle,
-               genome_fasta, vcf_file = None, ensgene_file = None,
-               enst_to_gene_name_file = None, string_alias_file = None,
-               string_links_file = None, evs_file = None):
+  def __init__(self, db_file, vcf_file, genome_fasta, pedigree):
+    self.version = "analyzetrio-1.0"
     self.weights = {"mendel": 1,
                     "nonsyn": 3,
                     "qv": 2,
@@ -85,393 +35,226 @@ class AnalyzeTrio():
                     "local_af": -6,
                     "net_cent": 1,
                     "net_nn": 1}
-    self.network_score_cutoff = 677
     self.exome_size = 30 * 10 ** 6
-    self.top_genes = ["ADAMTS8", "AIRE", "AK2", "ATM", "BTK", "CD247", "CD3D",
-                      "CD3G", "CD40LG", "CD8A", "CD8B", "CHD7", "CIITA",
-                      "CORO1A", "CYBB", "DCLRE1C", "DKC1", "DOCK8", "FOXN1",
-                      "IKBKG", "IL2RA", "IL2RG", "IL7R", "ITK", "JAK3", "LCK",
-                      "LIG4", "NBN", "NHEJ1", "ORAI1", "PNPLA2", "PRKDC",
-                      "PTPRC", "RAG1", "RAG2", "RFXANK", "SH2D1A", "STAT5B",
-                      "STIM1", "TAP1", "TAP2", "TAPBP", "TBX1", "WAS", "XIAP",
-                      "ZAP70", "ZBTB1"]
-    self.global_vcf = "data/AFR.2of4intersection_allele_freq" \
-                      ".20100804.genotypes.vcf.gz"
 
-    self.child_gender = child_gender
-
-    self.sample_names = pedigree.values()
-    self.stripped_samples = [x.replace("-", "") for x in pedigree.values()]
-
-    self.varprior_db = varprior_db
-    self.network_pickle = network_pickle
-    self.genome_fasta = genome_fasta
-
+    self.db_file = db_file
     self.vcf_file = vcf_file
-    self.ensgene_file = ensgene_file
-    self.enst_to_gene_name_file = enst_to_gene_name_file
-    self.string_alias_file = string_alias_file
-    self.string_links_file = string_links_file
+    self.genome_fasta = genome_fasta
 
     self.pedigree = pedigree
     self.stripped_pedigree = dict([(x, y.replace("-", "")) for \
                                    x, y in pedigree.items()])
 
-    sys.stderr.write("loading db\n")
-    self.conn, self.c, new_db = self.load_db()
-
     sys.stderr.write("loading genome\n")
-    self.pyf_genome = self.load_genome()
+    self.load_genome()
 
-    if new_db:
-      sys.stderr.write("loading annotation\n")
-      self.load_annotation(ensgene_file, enst_to_gene_name_file,
-                           string_alias_file)
+    sys.stderr.write("loading db\n")
 
-      sys.stderr.write("loading evs data\n")
-      self.load_evs(evs_file)
+    if not os.path.isfile(self.db_file):
+      self.db_connect()
+      self.db_init()
 
-    sys.stderr.write("loading vcf\n")
-    self.load_trio_vcf(vcf_file)
-
-    if os.path.isfile(network_pickle):
-      sys.stderr.write("loading network (pickle)\n")
-      self.gene_graph = networkx.read_gpickle(network_pickle)
+      sys.stderr.write("loading vcf\n")
+      self.load_vcf()
+      self.db_metadata("update")
     else:
-      sys.stderr.write("loading network\n")
-      self.gene_graph = self.load_string_network(string_links_file)
-
-      networkx.write_gpickle(self.gene_graph, network_pickle)
+      self.db_connect()
+      self.db_metadata("check")
 
   ##
-  ## FILE/DATABASE METHODS
+  ## DATABASE METHODS
   ##
 
-  def load_db(self):
-    if os.path.isfile(self.varprior_db):
-      conn = sqlite3.connect(self.varprior_db)
-      conn.row_factory = sqlite3.Row
-      c = conn.cursor()
-    
-      try:
-        idx_version = c.execute(
-          "SELECT value FROM metadata WHERE key = 'version'").fetchone()[0]
+  def db_connect(self):
+    self._conn = sqlite3.connect(self.db_file)
+    self._conn.row_factory = sqlite3.Row
+    self._c = self._conn.cursor()
 
-        if idx_version != "varprior-1.0":
-          raise ValueError(
-            "ensGene version (%s) incompatible with this version of Varprior" %
-            idx_version)
+  def db_init(self):
+    assert self._conn, self._c
 
-        record_count = int(c.execute(
-          "SELECT value FROM metadata WHERE key = 'records'").fetchone()[0])
+    tables = {}
 
-        if record_count == "-1":
-          raise ValueError("Unfinished/partial database provided")
+    tables["metadata"] = {"f": (("k", "text"),
+                                ("v", "text"))}
 
-        records_found = int(c.execute(
-          "SELECT COUNT(*) FROM ensGene").fetchone()[0])
+    tables["vcf_variants"] = {"f": (("vcf_variant_id", "integer primary key"),
+                                    ("chrom", "text"),
+                                    ("pos", "int"),
+                              "i": ("vcf_variant_id", ("chrom", "pos"))}
 
-        if record_count <> records_found:
-          raise ValueError(
-            "Corrupt index. Expected %s records, found %s" % (record_count,
-                                                              records_found))
-      except (sqlite3.OperationalError, sqlite3.DatabaseError), error:
-        raise ValueError("Problem with SQLite database: %s" % error)
+    tables["vcf_var_to_var"] = {"f": (("vcf_variant_id", "int"),
+                                      ("variant_id", "int")),
+                                "i": ("vcf_variant_id", "variant_id")}
 
-      new_db = False
-    else:
-      conn = sqlite3.connect(self.varprior_db)
-      conn.row_factory = sqlite3.Row
-      c = conn.cursor()
+    tables["vcf_alleles"] = {"f": (("vcf_allele_id", "integer primary key"),
+                                   ("variant_id", "int"),
+                                   ("sequence", "text"),
+                                   ("local_af", "float"),
+                             "i": ("vcf_allele_id", ("variant_id", "sequence"))}
 
-      c.execute("CREATE TABLE metadata (key text, value text)")
-      c.execute("CREATE TABLE ensGene (bin int, name text, chrom text, " \
-                "strand text, txStart int, txEnd int, cdsStart int, " \
-                "cdsEnd int, exonCount int, exonStarts text, exonEnds text, " \
-                "score int, name2 text, cdsStartStat text, cdsEndStat text, " \
-                "exonFrames text)")
-      c.execute("CREATE TABLE ensp_to_enst (ensp text, enst text)")   
-      c.execute("CREATE TABLE enst_to_gene_name (enst text, gene_name text)")
-      c.execute("CREATE TABLE variants (variant_id integer primary key, chrom text, pos int, %s)" %
-                ", ".join(["%s_1 text, %s_2 text, %s_QV" % ((x.replace("-", ""),) * 3) for x in self.sample_names]))
-      c.execute("CREATE TABLE gene_tests (gene_name text, net_cent_score float, " \
-                "net_cent_perc float, net_nn_score float, net_nn_perc float)")
-      c.execute("CREATE TABLE tx_mendel (enst text, model text, varid1 int, " \
-                "allele1 text, varid2 int, allele2 text)")
-      c.execute("CREATE TABLE variant_tests (variant_id int, allele text, " \
-                "local_af float, global_af float)")
-      c.execute("CREATE TABLE variant_nonsyn (variant_id int, allele text, " \
-                "enst text, mut text)")
-      c.execute("CREATE TABLE evs_pos (evs_pos_id integer primary key, " \
-                "chrom text, pos int, phastcons float)")
-      c.execute("CREATE TABLE evs_alleles (evs_pos_id int, allele text, af float)")
-      c.execute("CREATE TABLE evs_muts (evs_pos_id int, gene_name text, " \
-                "tx_name text, status text, mut_aa text, mut_nt text, polyphen text)")
- 
-      c.execute("INSERT INTO metadata VALUES ('version', 'varprior-1.0')")
-      c.execute("INSERT INTO metadata VALUES ('records', '-1')")
-      c.execute("INSERT INTO metadata VALUES ('variants', '-1')")
+    tables["vcf_all_to_all"] = {"f": (("vcf_allele_id", "int"),
+                                      ("allele_id", "int")),
+                                "i": ("vcf_allele_id", "allele_id")}
 
-      c.execute("CREATE INDEX IF NOT EXISTS ensp_ensp_to_enst ON ensp_to_enst(ensp);")
-      c.execute("CREATE INDEX IF NOT EXISTS enst_enst_to_gene_name ON enst_to_gene_name(enst);")
-      c.execute("CREATE INDEX IF NOT EXISTS gene_name_enst_to_gene_name ON enst_to_gene_name(gene_name);")
-      c.execute("CREATE INDEX IF NOT EXISTS gene_tests_gene_name ON gene_tests(gene_name);")
-      c.execute("CREATE INDEX IF NOT EXISTS variant_tests_variant_id_allele ON variant_tests(variant_id, allele);")
-      c.execute("CREATE INDEX IF NOT EXISTS variant_nonsyn_variant_id ON variant_nonsyn(variant_id);")
-      c.execute("CREATE INDEX IF NOT EXISTS variant_nonsyn_enst ON variant_nonsyn(enst);")
-      c.execute("CREATE INDEX IF NOT EXISTS enst_tx_mendel ON tx_mendel(enst);")
+    tables["vcf_muts"] = {"f": (("vcf_mut_id", "integer primary key"),
+                                ("vcf_allele_id", "int"),
+                                ("tx_id", "int"),
+                                ("mut", "text")),
+                          "i": ("vcf_mut_id", "vcf_allele_id", "tx_id")}
 
-      new_db = True
+    inserts = {}
 
-    return conn, c, new_db
+    inserts["metadata"] = {"f": ("k", "v"),
+                           "r": (("version", self.version),
+                                 ("vcf_file", "-1"),
+                                 ("vcf_variants", "-1"),
+                                 ("vcf_alleles", "-1"),
+                                 ("vcf_muts", "-1"))}
+
+    for t in tables:
+      f = ["%s %s" % (x, y) for x, y in tables[t]["f"]]
+
+      self._c.execute("CREATE TABLE %s (%s)" % (t, ", ".join(f)))
+
+      if "i" in tables[t]:
+        for i in tables[t]["i"]:
+          n = "_".join(i) if isinstance(i, tuple) else i
+          f = ", ".join(i) if isinstance(i, tuple) else i
+
+          self._c.execute(
+            "CREATE INDEX IF NOT EXISTS %(t)s_%(n)s ON %(t)s(%(f)s)" %
+            {"t": t, "n": n, "f": f})
+
+    for t in inserts:
+      f = ", ".join(inserts[t]["f"])
+      b = ", ".join(["?" for _ in inserts[t]["f"]])
+
+      self._c.executemany("INSERT INTO %(t)s (%(f)s) VALUES (%(b)s)" %
+        {"t": t, "f": f, "b": b}, inserts[t]["r"])
+
+    self._conn.commit()
+
+  def db_metadata(self, action):
+    assert self._conn, self._c
+
+    md = {"version": ("l", self.version),
+          "vcf_file": ("l", self.vcf_file),
+          "vcf_variants": ("q", "SELECT COUNT(*) FROM vcf_variants"),
+          "vcf_alleles": ("q", "SELECT COUNT(*) FROM vcf_alleles"),
+          "vcf_muts": ("q", "SELECT COUNT(*) FROM vcf_muts")}
+
+    if action == "check":
+      for k, q in md.items():
+        md_v = self._c.execute("SELECT v FROM metadata WHERE k = '%s'" % k).fetchone()[0]
+
+        if q[0] == "q":
+          ac_v = self._c.execute(q).fetchone()[0]
+        elif q[0] == "l":
+          ac_v = q[1]
+
+        if md_v != ac_v:
+          raise ValueError("Invalid DB metadata (%s, %s != %s)" % (k, md_v, ac_v))
+    elif action == "update":
+      for k, q in md.items():
+        if q[0] == "q":
+          ac_v = self._c.execute(q).fetchone()[0]
+
+          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (k, ac_v))
 
   def load_genome(self):
-    return pyfasta.Fasta(self.genome_fasta,
+    self.pyf_genome = pyfasta.Fasta(self.genome_fasta,
                          record_class=pyfasta.records.MutNpyFastaRecord)
 
-  def load_annotation(self, ensgene_file, enst_to_gene_name_file,
-                      string_alias_file):
+  ##
+  ## FILE LOADING METHODS
+  ##
+
+  def load_trio_vcf(self, vcf_file):
     assert self.conn, self.c
 
-    if ensgene_file == None or \
-       enst_to_gene_name_file == None or \
-       string_alias_file == None:
-      raise ValueError("Cannot load annotation without input files")
+    # has the table already been loaded?
+    md_v = self._c.execute("SELECT v FROM metadata WHERE k = 'vcf_variants'").fetchone()[0]
 
-    # load ensemblToGeneName (translates ENST -> short names, e.g. IL2RG)
-    for line in [x.strip().split() for x in open(enst_to_gene_name_file)]:
-      self.c.execute(
-        "INSERT INTO enst_to_gene_name VALUES ('%s', '%s')" % (line[0], line[1]))
+    if int(md_v) != -1:
+      raise ValueError("Unexpected DB metadata (vcf_variants, %s != -1)" % md_v)
 
-    # load string aliases (translates ENSP -> ENST/ENSG)
-    for line in [x.strip().split() for x in open(string_alias_file)]:
-      if line[2].startswith("ENST"):
-        self.c.execute(
-          "INSERT INTO ensp_to_enst VALUES ('%s', '%s')" % (line[1], line[2]))
-
-    # load ensgene
     s_time = time.time()
     processed = 0
     batch = []
 
-    for line in open(ensgene_file, "r"):
-      line_split = line.strip().split()
+    for l in open(vcf_file):
+      # parse the header, find columns of interest
+      if l.startswith("#"):
+        if l.startswith("#CHROM"):
+          header = l.strip().split()
 
-      if processed == 0:
-        ensgene_keys = line_split
+          kept_cols = []
+          cols = ["variant_id", "chrom", "pos"]
+
+          for i, n in enumerate(header):
+            if n.startswith("jp"):
+              cols.extend(["%s_1" % n, "%s_2" % n, "%s_QV" % n])
+              kept_cols.append((i, n))
+
+              self._c.execute("ALTER TABLE vcf_variants ADD COLUMN %s_1 text" % n)
+              self._c.execute("ALTER TABLE vcf_variants ADD COLUMN %s_2 text" % n)
+              self._c.execute("ALTER TABLE vcf_variants ADD COLUMN %s_QV int" % n)
+
+        continue
+
+      # parse rest of file
+      l = l.strip().split()
+
+      chrom = "chr%s" % l[0]
+      pos = int(l[1])
+      ref = l[3]
+      alt = [(str(x + 1), y) for x, y in enumerate(l[4].split(","))]
+      code = dict([(str(0), ref)] + alt)
+
+      f_names = l[8].split(":")
+
+      samples = {}
+
+      for i, n in kept_cols:
+        f_data = l[i].split(":")
+
+        col_data = dict(zip(f_names, f_data))
+        col_data["GT"] = [code[x] for x in col_data["GT"].split("/", 1)]
+
+        if "." in col_data["GT"]:
+          break
+
+        samples[n] = col_data
       else:
-        batch.append(line_split)
+        # match variant to static db
+        v = self.vd.fetch_variant(chrom, pos)
 
-      processed += 1
+        row = [-1 if v == None else v.variant_id, chrom, pos]
+
+        for _, n in kept_cols:
+          row.append(samples[n]["GT"][0],
+                     samples[n]["GT"][1],
+                     samples[n]["GQ"] if "GQ" in samples[n] else "0")
+
+        batch.append(row)
+        processed += 1
+
       if processed % 100 == 0:
-        self.c.executemany("INSERT INTO ensGene VALUES (%s)" % (",".join(("?",) * len(ensgene_keys))), batch)
+        self.c.executemany("INSERT INTO vcf_variants (%s) VALUES (%s)" %
+          (", ".join(["'%s'" % x for x in cols]),
+           ", ".join(["?" for _ in cols])), batch)
         self.conn.commit()
         batch = []
         sys.stderr.write("\rprocessed %s @ %.02f/s" %
           (processed, processed / (time.time() - s_time)))
 
-    self.c.executemany("INSERT INTO ensGene VALUES (%s)" % (",".join(("?",) * len(ensgene_keys))), batch)
-    sys.stderr.write("\nindexing\n")
-    self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'records'" % (processed - 1))
-    self.c.execute("CREATE INDEX IF NOT EXISTS ensgene_name ON ensGene(name);")
-    self.c.execute("CREATE INDEX IF NOT EXISTS ensgene_chrom_bin ON ensGene(chrom, bin);")
-    self.c.execute("CREATE INDEX IF NOT EXISTS ensgene_cdsStart ON ensGene(cdsStart);")
-    self.c.execute("CREATE INDEX IF NOT EXISTS ensgene_cdsEnd ON ensGene(cdsEnd);")
+    self.c.executemany("INSERT INTO vcf_variants (%s) VALUES (%s)" %
+      (", ".join(["'%s'" % x for x in cols]),
+       ", ".join(["?" for _ in cols])), batch)
     self.conn.commit()
-
-  def load_trio_vcf(self, vcf_file):
-    assert self.conn, self.c
-
-    variant_count = int(self.c.execute(
-      "SELECT value FROM metadata WHERE key = 'variants'").fetchone()[0])
-
-    if variant_count > -1:
-      if vcf_file != None:
-        db_vcf_file = self.c.execute(
-          "SELECT value FROM metadata WHERE key = 'vcf_file'").fetchone()[0]
-
-        if vcf_file != db_vcf_file:
-          raise ValueError(
-            "Database variants do not match specified file (%s != %s)" %
-            (db_vcf_file, vcf_file))
-
-        variants_found = int(self.c.execute(
-          "SELECT COUNT(*) FROM variants").fetchone()[0])
-
-        if variant_count <> variants_found:
-          raise ValueError(
-            "Corrupt index. Expected %s records, found %s" % (variant_count,
-                                                              variants_found))
-    else:
-      if vcf_file == None:
-        raise ValueError("Database empty and no vcf_file specified")
-
-      s_time = time.time()
-      processed = 0
-
-      batch = []
-      cols = ["chrom", "pos"] + sum([["%s_1" % x, "%s_2" % x, "%s_QV" % x] for x in self.stripped_samples], [])
-
-      for line in open(vcf_file, "r"):
-        # parse the header, find columns of interest
-        if line.startswith("#"):
-          if line.startswith("#CHROM"):
-            header = line.strip().split()
-    
-            try:
-              kept_cols = [(x.replace("-", ""), header.index(x)) for x in self.sample_names]
-            except ValueError, error:
-              raise ValueError(
-                "Specified sample (%s) not in VCF (%s)" % (error.split()[0],
-                                                           vcf_file))
-
-          continue
-
-        # parse rest of file
-        line_split = line.strip().split()
-        chrom = "chr%s" % line_split[0]
-
-        sample_to_data = {}
-    
-        for sample, column in kept_cols: 
-          pos = int(line_split[1])
-          ref = line_split[3]
-          alt = [(str(x + 1), y) for x, y in enumerate(line_split[4].split(","))]
-        
-          code = dict([(str(0), ref)] + alt)
-
-          f_names = line_split[8].split(":")
-          f_data = line_split[column].split(":")
-
-          col_data = dict(zip(f_names, f_data))
-          col_data["GT"] = reduce(lambda x, y: x.replace(y, code[y]), code, col_data["GT"]).split("/", 1)
-
-          if "." in col_data["GT"]:
-            break
-
-          sample_to_data[sample] = col_data
-        else:
-          data = [chrom, pos] + sum([[sample_to_data[x]["GT"][0],
-            sample_to_data[x]["GT"][1], sample_to_data[x]["GQ"] if "GQ" in sample_to_data[x] \
-            else "0"] for x in self.stripped_samples], [])
-
-          batch.append(data)
-          processed += 1
-
-        if processed % 100 == 0:
-          self.c.executemany("INSERT INTO variants (%s) VALUES (%s)" %
-            (", ".join(["'%s'" % x for x in cols]),
-             ", ".join(["?" for _ in cols])), batch)
-          self.conn.commit()
-          batch = []
-          sys.stderr.write("\rprocessed %s @ %.02f/s" %
-            (processed, processed / (time.time() - s_time)))
-
-      self.c.executemany("INSERT INTO variants (%s) VALUES (%s)" %
-        (", ".join(["'%s'" % x for x in cols]),
-         ", ".join(["?" for _ in cols])), batch)
-      self.c.execute("INSERT INTO metadata VALUES ('vcf_file', '%s')" % vcf_file)
-      self.c.execute("UPDATE metadata SET value = '%s' WHERE key = 'variants'" % processed)
-      sys.stderr.write("\nindexing\n")
-      self.c.execute("CREATE INDEX IF NOT EXISTS variants_chrom_pos ON variants(chrom, pos);")
-      self.c.execute("CREATE INDEX IF NOT EXISTS variants_variant_id ON variants(variant_id);")
-      self.conn.commit()
-
-  def load_evs(self, evs_file):
-    assert self.conn, self.c
-
-    evs = dict([(x, {}) for x in self.pyf_genome.keys()])
-
-    s_time = time.time()
-    processed = 0
-
-    for line in open(evs_file):
-      if line.startswith("#"):
-        continue
-
-      line_split = line.strip().split()
-
-      chrom, pos = line_split[0].split(":")
-      chrom = "chr%s" % chrom
-
-      try:
-        evs[chrom][pos]
-      except KeyError:
-        evs[chrom][pos] = {}
-
-      try:
-        evs[chrom][pos]["phastcons"] = float(line_split[18])
-      except ValueError:
-        evs[chrom][pos]["phastcons"] = -1
-
-      try:
-        evs[chrom][pos]["muts"]
-      except KeyError:
-        evs[chrom][pos]["muts"] = []
-
-      if line_split[12] != "none":
-        evs[chrom][pos]["muts"].append(line_split[12:17] + [line_split[21]])
-
-      try:
-        evs[chrom][pos]["alleles"]
-      except KeyError:
-        evs[chrom][pos]["alleles"] = {}
-
-        af = dict([(x, int(y)) for x, y in [x.split("=") for x in line_split[6].split("/")]])
-        total_count = float(sum(af.values()))
-
-        if "R" in af:
-          o2n = dict([("A%s" % (x+1), y) for x, y in enumerate([x.split(">")[1] \
-            for x in line_split[3].split(";")])])
-          o2n["R"] = line_split[3].split(">")[0]
-
-          new_af = dict([(o2n[x], y) for x, y in af.items()])
-          af = new_af
-
-        for allele, count in af.items():
-          evs[chrom][pos]["alleles"][allele] = count / total_count
-
-        processed += 1
-        if processed % 100 == 0:
-          sys.stderr.write("\rloaded %s @ %.02f/s" %
-            (processed, processed / (time.time() - s_time)))
-
-    sys.stderr.write("\n")
-    s_time = time.time()
-    processed = 0
-
-    for chrom in sorted(evs.keys()):
-      for pos in sorted(evs[chrom].keys()):
-        self.c.execute(
-          "INSERT INTO evs_pos (chrom, pos, phastcons) VALUES " \
-          "('%s', %s, %s)" % (chrom, pos, evs[chrom][pos]["phastcons"]))
-
-        evs_pos_id = self.c.lastrowid
-
-        for allele in evs[chrom][pos]["alleles"]:
-          self.c.execute(
-            "INSERT INTO evs_alleles (evs_pos_id, allele, af) VALUES " \
-            "(%s, '%s', %s)" % 
-            (evs_pos_id, allele, evs[chrom][pos]["alleles"][allele]))
-
-        for mut in evs[chrom][pos]["muts"]:
-          self.c.execute(
-            "INSERT INTO evs_muts (evs_pos_id, gene_name, tx_name, status, " \
-            "mut_aa, mut_nt, polyphen) VALUES (%s)" %
-            (", ".join(["'%s'" % x for x in [evs_pos_id] + mut])))
-
-        processed += 1
-        if processed % 100 == 0:
-          self.conn.commit()
-          sys.stderr.write("\rinserted %s @ %.02f/s" %
-            (processed, processed / (time.time() - s_time)))
-
-    sys.stderr.write("\nindexing\n")
-    self.c.execute("CREATE INDEX IF NOT EXISTS evs_pos_chrom_pos ON evs_pos(chrom, pos);")
-    self.c.execute("CREATE INDEX IF NOT EXISTS evs_pos_evs_pos_id ON evs_pos(evs_pos_id);")
-    self.c.execute("CREATE INDEX IF NOT EXISTS evs_alleles_evs_pos_id ON evs_alleles(evs_pos_id);")
-    self.c.execute("CREATE INDEX IF NOT EXISTS evs_muts_evs_pos_id ON evs_muts(evs_pos_id);")
-    self.conn.commit()
+    sys.stderr.write("\rprocessed %s @ %.02f/s" %
+      (processed, processed / (time.time() - s_time)))
 
   @staticmethod
   def region2bin (start, end, join = False):
@@ -494,49 +277,6 @@ class AnalyzeTrio():
       return ", ".join(map(str, set(bins)))
     else:
       return list(set(bins))
-
-  def ensp_to_gene_name(self, ensp):
-    assert self.conn, self.c
-
-    gene_names = self.c.execute(
-      "SELECT enst_to_gene_name.gene_name FROM enst_to_gene_name, ensp_to_enst "
-      "WHERE ensp_to_enst.enst = enst_to_gene_name.enst AND "
-      "ensp_to_enst.ensp = '%s'" % ensp)
-
-    return list(set([x["gene_name"] for x in gene_names]))
-
-  def gene_names(self):
-    assert self.conn, self.c
-
-    gene_names = self.c.execute(
-      "SELECT gene_name FROM enst_to_gene_name GROUP BY gene_name").fetchall()
-
-    for gene in [x["gene_name"] for x in gene_names]:
-      yield gene
-
-  def tx_names(self):
-    assert self.conn, self.c
-
-    tx_names = self.c.execute(
-      "SELECT enst FROM enst_to_gene_name GROUP BY enst").fetchall()
-
-    for enst in ([x["enst"] for x in tx_names]):
-      yield enst
-
-  def fetch_tx(self, enst):
-    assert self.conn, self.c
-
-    data = self.c.execute("SELECT * FROM ensGene WHERE name = '%s'" % enst).fetchone()
-
-    return data
-
-  def variants(self):
-    assert self.conn, self.c
-
-    variants = self.c.execute("SELECT * FROM variants").fetchall()
-
-    for v in variants:
-      yield v
 
   ##
   ## INHERITANCE FILTER METHODS
@@ -670,21 +410,6 @@ class AnalyzeTrio():
   ## GENOME/CODING POTENTIAL METHODS
   ##
 
-  def non_synonymous_gene(self, gene_name, mut):
-    # gene_name -> enst
-    all_enst = [x[0] for x in self.c.execute(
-      "SELECT enst FROM enst_to_gene_name WHERE gene_name = '%s'" % \
-      gene_name).fetchall()]
-
-    if len(all_enst) == 0:
-      raise ValueError("Gene (%s) not found in database" % gene_name)
-
-    results = {}
-
-    # examine each transcript isoform of this gene
-    for enst in all_enst:
-      results[enst] = self.non_synonymous_tx(enst, mut)
-
   def non_synonymous_tx(self, enst, mut):
     # fetch exons
     chrom, strand, exonStarts, exonEnds, cdsStart, cdsEnd = self.c.execute(
@@ -791,200 +516,6 @@ class AnalyzeTrio():
 
     return all_af
 
-  def tabix_af_in_region(self, vcf_file, chrom, start, end):
-    # retrieve allele frequencies of SNPs in given region
-    # of tabix-indexed VCF file
-    tabix_out = tempfile.NamedTemporaryFile(delete=False)
-    
-    tabix = subprocess.Popen(["tabix", "-f", "-h", vcf_file,
-                              "%s:%s-%s" % (chrom, start, end)],
-                             stdout=tabix_out)
-    
-    while tabix.poll() == None:
-      time.sleep(0.01)
-
-    if os.stat(tabix_out.name).st_size == 0:
-      af_table = {}
-    else:
-      af_table = self.af_from_vcf(tabix_out.name)
-
-    os.unlink(tabix_out.name)
-
-    return af_table
-
-  def af_from_vcf(self, vcf_file):
-    # allele frequencies from any given vcf
-    af_table = dict([(x, {}) for x in self.pyf_genome.keys()])
-
-    vcftools_out = tempfile.NamedTemporaryFile(delete=False)
-    
-    vcftools = subprocess.Popen(["vcftools", "--vcf", vcf_file,
-                                 "--freq", "--out", vcftools_out.name],
-                                stdout=open(os.devnull))
-    
-    while vcftools.poll() == None:
-      time.sleep(0.01)
-
-    if os.path.isfile("%s.frq" % vcftools_out.name):
-      with open("%s.frq" % vcftools_out.name) as fp:
-        fp.next()
-        
-        for line in fp:
-          line_split = line.strip().split()
-        
-          for allele, freq in [x.split(":") for x in line_split[4:]]:
-            chrom = "chr%s" % line_split[0]
-
-            try:
-              af_table[chrom][int(line_split[1])][allele] = float(freq)
-            except KeyError:
-              af_table[chrom][int(line_split[1])] = {}
-              af_table[chrom][int(line_split[1])][allele] = float(freq)
-
-      os.unlink("%s.frq" % vcftools_out.name)
-
-    os.unlink("%s.vcfidx" % vcf_file)
-    os.unlink("%s.log" % vcftools_out.name)
-    os.unlink(vcftools_out.name)
-
-    for chrom in af_table.keys():
-      if len(af_table[chrom]) == 0:
-        del af_table[chrom]
-
-    return af_table
-
-  ##
-  ## NETWORK METHODS
-  ##
-
-  def load_string_network(self, string_network_links):
-    # NOTE: scores are 1000 - the score so we can use shortest path algorithms
-    # NOTE: we don't use a multigraph and instead update to keep edge weights minimum
-    assert self.conn, self.c
-
-    # generate STRING graph with gene names
-    gene_graph = networkx.Graph(directed=False)
-    sys.stderr.write("    nodes\n")
-    gene_graph.add_nodes_from(self.gene_names())
-        
-    links = [x.strip().split() for x in open(string_network_links)]
-
-    for line_num, line in enumerate(links):
-      if float(line[2]) < self.network_score_cutoff:
-        continue
-
-      gene1 = self.ensp_to_gene_name(line[0][5:])
-      gene2 = self.ensp_to_gene_name(line[1][5:])
-        
-      for node1, node2 in itertools.product(gene1, gene2):
-        weight = 1000 - float(line[2])
-
-        try:
-          if gene_graph[node1][node2]["weight"] > weight:
-            gene_graph[node1][node2]["weight"] = weight
-            continue
-        except KeyError:
-          gene_graph.add_edge(node1, node2, weight=weight)
-
-          if line_num % 100 == 0:
-            num_stars = int(math.ceil(line_num / float(len(links)) * 10))
-            progress = ["*"] * num_stars + [" "] * (10 - num_stars)
-
-            sys.stderr.write("\r    edges [%s]" % "".join(progress))
-
-    sys.stderr.write("\n")
-
-    return gene_graph
-
-  def mk_subgraph(self):
-    # return subgraph induced by top genes and their first-degree neighbors
-    neighbors = list(itertools.chain(*[self.gene_graph.neighbors(x) for x in self.top_genes]))
-    subgraph = self.gene_graph.subgraph(neighbors + self.top_genes)
-
-    return subgraph
-
-  @staticmethod
-  def find_connected_genes(node_list, max_depth, graph):
-    # find genes within n connections of given gene
-    assert isinstance(node_list, list)
-    
-    connected_nodes = []
-    
-    # depth-limited search
-    def _dls(node, depth):
-      if depth == 0:
-        return 
-    
-      for neighbor_node in graph.neighbors(node):
-        connected_nodes.append(neighbor_node)
-        _dls(neighbor_node, depth - 1)
-                
-    for gene in gene_list:
-      _dls(gene, max_depth)
-    
-    return set(connected_nodes)
-
-  def plot_network(self):
-    neighbors = list(itertools.chain(*[self.gene_graph.neighbors(x) for x in self.top_genes]))
-    subgraph = self.gene_graph.subgraph(neighbors + self.top_genes)
-    pos = networkx.graphviz_layout(subgraph, prog="neato")
-    labels = dict(zip(neighbors + sys.argv[2:], neighbors + self.top_genes))
-    
-    networkx.draw_networkx_nodes(subgraph, pos, nodelist=neighbors, node_color="#fdb462")
-    networkx.draw_networkx_nodes(subgraph, pos, nodelist=self.top_genes, node_color="#80b1d3")
-    
-    networkx.draw_networkx_edges(subgraph, pos, alpha=0.1)
-    
-    networkx.draw_networkx_labels(subgraph, pos, labels)
-    
-    plt.figure(1, figsize=(16, 16))
-    plt.axis("off")
-    plt.show()
-
-  def score_all_genes(self, graph):
-    # two scores:
-    # harmonic centrality defines how well connected a gene is all puck genes
-    # nearest-neighobr defines how close a gene is to its nearest puck gene
-
-    p = Pool(NUM_PROCS)
-    partial_score_gene = partial(score_gene, graph=graph, top_genes=self.top_genes)
-    result = p.map(partial_score_gene, self.gene_names())
-    p.close()
-
-    # and now go through and convert them all to percentiles
-    cent_hist = numpy.array([x[1] for x in result if x[1] != -1])
-    nn_hist = numpy.array([x[2] for x in result if x[2] != -1])
-
-    batch = []
-
-    for gene, cent_score, nn_score in result:
-      # edge case: gene is a top gene
-      if gene in self.top_genes:
-        cent_perc = 1
-        nn_perc = 1
-      # edge case: gene isn't in network
-      elif cent_score == -1 or \
-           nn_score == -1:
-        cent_perc = 0
-        nn_perc = 0
-      else:
-        cent_perc = scipy.stats.percentileofscore(cent_hist, cent_score) / 100.0
-        nn_perc = 1 - scipy.stats.percentileofscore(nn_hist, nn_score) / 100.0
-
-        print """
-gene:  %s
-  c:   %s
-  c_p: %s
-  n:   %s
-  n_p: %s
-""" % (gene, cent_score, cent_perc, nn_score, nn_perc)
-
-      batch.append((gene, cent_score, cent_perc, nn_score, nn_perc))
-
-    self.c.executemany("INSERT INTO gene_tests (gene_name, net_cent_score, " \
-      "net_cent_perc, net_nn_score, net_nn_perc) VALUES (?,?,?,?,?)", batch)
-    self.conn.commit()
-
   ##
   ## STATISTICS METHODS
   ##
@@ -1043,9 +574,6 @@ gene:  %s
                                                seq,
                                                enst,
                                                "".join(map(str, mut))))
-
-  def nonsyn_evs(self, variant, nonref_seqs):
-    pass
 
   def af_native(self, variant, all_seqs):
     try:

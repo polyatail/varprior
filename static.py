@@ -45,6 +45,7 @@ class Allele:
 
 class VariantData:
   def __init__(self, db_file):
+    self.version = "variantdata-1.0"
     self.db_file = db_file
 
   def db_connect(self):
@@ -125,7 +126,7 @@ class VariantData:
     inserts = {}
 
     inserts["metadata"] = {"f": ("k", "v"),
-                           "r": (("version", "variantdata-1.0"),
+                           "r": (("version", self.version),
                                  ("transcripts", "-1"),
                                  ("proteins", "-1"),
                                  ("genes", "-1"),
@@ -604,6 +605,9 @@ class VariantData:
       d = self._c.execute("SELECT * FROM variants WHERE variant_id = %s" % variant_id).fetchone()
     elif chrom and pos:
       d = self._c.execute("SELECT * FROM variants WHERE chrom = '%s' AND pos = %s" % (chrom, pos)).fetchone()
+
+    if d == None:
+      return None
 
     v = Variant(d["variant_id"])
 
