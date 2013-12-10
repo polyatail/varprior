@@ -43,10 +43,18 @@ class Allele:
   def __init__(self, allele_id):
     self.allele_id = allele_id
 
+class Mutation:
+  def __init__(self, mut_id):
+    self.mut_id = mut_id
+
 class VariantData:
   def __init__(self, db_file):
     self.version = "variantdata-1.0"
     self.db_file = db_file
+
+  ##
+  ## DATABASE METHODS
+  ##
 
   def db_connect(self):
     self._conn = sqlite3.connect(self.db_file)
@@ -185,6 +193,352 @@ class VariantData:
           ac_v = self._c.execute(q).fetchone()[0]
 
           self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (k, ac_v))
+
+  def find_tx_overlapping_var(self, variant_id):
+    assert self._conn, self._c
+
+    if not variant_id:
+      raise ValueError("Must specify variant_id")
+
+    v = self.fetch_variant(variant_id=variant_id)
+
+    if v == None:
+      raise ValueError("No variant matching variant_id=%s" % variant_id)
+
+    d = self._c.execute("SELECT tx_id FROM tx_to_variant WHERE variant_id = %s" %
+      v.variant_id).fetchall()
+
+    if d == None:
+      d = self._c.execute("SELECT tx_id FROM transcripts WHERE chrom = '%s' AND " \
+        "%s BETWEEN tx_start AND tx_end" % (v.chrom, v.pos)).fetchall()
+
+      if d != None:
+        batch = [(x["tx_id"], variant_id) for x in d]
+        self._c.executemany("INSERT INTO tx_to_variant (tx_id, variant_id) VALUES " \
+          "(?, ?)", batch)
+
+        tx = [self.fetch_tx(tx_id=x[0]) for x in batch]
+        return tx
+      else:
+        return None
+    else:
+      tx = [self.fetch_tx(tx_id=x["tx_id"]) for x in d]
+      return tx
+
+  def find_var_overlapping_tx(self, tx_id):
+    assert self._conn, self._c
+
+    if not tx_id:
+      raise ValueError("Must specify tx_id")
+
+    t = self.fetch_tx(tx_id=tx_id)
+
+    if t == None:
+      raise ValueError("No transcript matching tx_id=%s" % tx_id)
+
+    d = self._c.execute("SELECT variant_id FROM tx_to_variant WHERE tx_id = %s" %
+      t.tx_id).fetchall()
+
+    if d == None:
+      d = self._c.execute("SELECT variant_id FROM variants WHERE chrom = %s AND " \
+        "pos BETWEEN %s AND %s" % (t.chrom, t.tx_start, t.tx_end)).fetchall()
+
+      if d != None:
+        batch = [(t.tx_id, x["variant_id"]) for x in d]
+        self._c.executemany("INSERT INTO tx_to_variant (tx_id, variant_id) VALUES " \
+          "(?, ?)", batch)
+
+        v = [self.fetch_variant(variant_id=x[1]) for x in batch]
+        return v
+      else:
+        return None
+    else:
+      v = [self.fetch_variant(x["variant_id"]) for x in d]
+      return v
+
+  def find_all_tx_var_overlaps(self):
+    assert self._conn, self._c
+
+    for t in self.fetch_all_tx():
+      self.find_var_overlapping_tx(t.tx_id)
+
+  def fetch_gene(self, gene_name = None, gene_id = None):
+    assert self._conn, self._c
+
+    if not (gene_name ^ gene_id):
+      raise ValueError("Must specify either gene_name or gene_id")
+
+    if gene_id:
+      d = self._c.execute("SELECT * FROM genes WHERE gene_id = %s" % gene_id).fetchone()
+    elif gene_name:
+      d = self._c.execute("SELECT * FROM genes WHERE gene_name = %s" % gene_name).fetchone()
+
+    if d == None:
+      return None
+
+    g = Gene(d["gene_id"], d["name"])
+
+    g.cent_score = d["cent_score"]
+    g.cent_perc = d["cent_perc"]
+    g.nn_score = d["nn_score"]
+    g.nn_perc = d["nn_perc"]
+
+    g.transcripts = {}
+
+    all_tx = self._c.execute("SELECT tx_id FROM gene_to_tx WHERE gene_id = '%s'" % g.gene_id).fetchall()
+
+    for tx_id in all_tx:
+      t = self.fetch_tx(tx_id=tx_id["tx_id"])
+
+      g.transcripts[t.name] = t
+
+  def fetch_all_genes(self):
+    assert self._conn, self._c
+
+    d = self._c.execute("SELECT gene_id FROM genes").fetchall()
+
+    for g in d:
+      yield self.fetch_gene(gene_id=g["gene_id"])
+
+  def fetch_tx(self, tx_name = None, tx_id = None):
+    assert self._conn, self._c
+
+    if not (tx_name ^ tx_id):
+      raise ValueError("Must specify either tx_name or tx_id")
+
+    if tx_id:
+      d = self._c.execute("SELECT * FROM transcripts WHERE tx_id = %s" % tx_id).fetchone()
+    elif tx_name:
+      d = self._c.execute("SELECT * FROM transcripts WHERE tx_name = %s" % tx_name).fetchone()
+
+    if d == None:
+      return None
+
+    t = Transcript(d["tx_id"], d["name"])
+
+    t.bin = d["bin"]
+    t.chrom = d["chrom"]
+    t.tx_start = d["tx_start"]
+    t.tx_end = d["tx_end"]
+    t.cds_start = d["cds_start"]
+    t.cds_end = d["cds_end"]
+    t.exon_starts = d["exon_starts"].split(",")[:-1]
+    t.exon_ends = d["exon_ends"].split(",")[:-1]
+
+    t.proteins = {}
+
+    all_prot = self._c.execute("SELECT protein_id FROM protein_to_tx WHERE tx_id = %s" % t.tx_id).fetchall()
+
+    for prot_id in all_prot:
+      p = self.fetch_protein(protein_id=prot_id["protein_id"])
+
+      t.proteins[p.name] = p
+
+    return t
+
+  def fetch_all_tx(self):
+    assert self._conn, self._c
+
+    d = self._c.execute("SELECT tx_id FROM transcripts").fetchall()
+
+    for t in tx:
+      yield self.fetch_tx(tx_id=t["tx_id"])
+
+  def fetch_protein(self, protein_name = None, protein_id = None):
+    assert self._conn, self._c
+
+    if not (protein_name ^ protein_id):
+      raise ValueError("Must specify either protein_name or protein_id")
+
+    if protein_id:
+      d = self._c.execute("SELECT * FROM transcripts WHERE protein_id = %s" % protein_id).fetchone()
+    elif protein_name:
+      d = self._c.execute("SELECT * FROM transcripts WHERE protein_name = %s" % protein_name).fetchone()
+
+    if d == None:
+      return None
+
+    p = Protein(d["protein_id"], d["name"])
+
+    return p
+
+  def fetch_variant(self, chrom = None, pos = None, variant_id = None):
+    assert self._conn, self._c
+
+    if not ((chrom and pos) ^ variant_id):
+      raise ValueError("Must specify either chrom and pos or variant_id")
+
+    if variant_id:
+      d = self._c.execute("SELECT * FROM variants WHERE variant_id = %s" % variant_id).fetchone()
+    elif chrom and pos:
+      d = self._c.execute("SELECT * FROM variants WHERE chrom = '%s' AND pos = %s" % (chrom, pos)).fetchone()
+
+    if d == None:
+      return None
+
+    v = Variant(d["variant_id"])
+
+    v.chrom = d["chrom"]
+    v.pos = d["pos"]
+    v.phylop = d["phylop"]
+    v.siphy = d["siphy"]
+
+    v.alleles = {}
+
+    all_alleles = self._c.execute("SELECT allele_id FROM alleles WHERE variant_id = '%s'" % v.variant_id).fetchall()
+
+    for allele_id in all_alleles:
+      a = self.fetch_allele(allele_id=allele_id["allele_id"])
+
+      v.alleles[a.sequence] = a
+
+    return v
+
+  def new_variant(self, chrom, pos):
+    assert self._conn, self._c
+
+    if not (chrom and pos):
+      raise ValueError("Must specify chrom and pos")
+
+    v = self.fetch_variant(chrom=chrom, pos=pos)
+
+    if v != None:
+      raise ValueError("Variant exists where chrom=%s, pos=%s" % (chrom, pos))
+
+    self._c.execute("INSERT INTO variants (chrom, pos) VALUES (%s, %s)" % (chrom, pos))
+    v = self.fetch_variant(variant_id=self._c.lastrowid)
+    self.find_tx_overlapping_var(v.variant_id)
+
+    return v
+
+  def fetch_variant_overlapping(self, chrom, start, end):
+    assert self._conn, self._c
+
+    if not (chrom and start and end):
+      raise ValueError("Must specify chrom, start, and end")
+
+    d = self._c.execute("SELECT variant_id FROM variants WHERE chrom = '%s' " \
+      "AND pos BETWEEN %s AND %s" % (chrom, start, end)).fetchall()
+
+    variants = [self.fetch_variant(variant_id=x["variant_id"]) for x in d]
+
+    return variants
+
+  def fetch_allele(self, variant_id = None, seq = None, allele_id = None):
+    assert self._conn, self._c
+
+    if not ((variant_id and seq) ^ allele_id):
+      raise ValueError("Must specify either variant_id and seq or allele_id")
+
+    if allele_id:
+      d = self._c.execute("SELECT * FROM alleles WHERE allele_id = %s" % 
+        allele_id).fetchone()
+    elif variant_id and seq:
+      d = self._c.execute("SELECT * FROM alleles WHERE variant_id = %s AND " \
+        "seq = '%s'" % (variant_id, seq)).fetchone()
+
+    if d == None:
+      return None
+
+    a = Allele(d["allele_id"])
+
+    a.variant_id = d["variant_id"]
+    a.sequence = d["sequence"]
+    a.evs_af = d["evs_af"]
+    a.tgp_af = d["tgp_af"]
+    a.polyphen_hdiv = d["polyphen_hdiv"]
+    a.polyphen_hvar = d["polyphen_hvar"]
+    a.mut_taster = d["mut_taster"]
+    a.mut_assessor = d["mut_assessor"]
+
+    a.muts = {}
+
+    all_muts = self._c.execute("SELECT mut_id FROM muts WHERE allele_id = '%s'" % a.allele_id).fetchall()
+
+    for mut_id in all_muts:
+      m = self.fetch_mut(mut_id=mut_id["mut_id"])
+
+      a.muts[m.tx_id] = m.mut
+
+    return a
+
+  def new_allele(self, variant_id, seq):
+    assert self._conn, self._c
+
+    if not (variant_id and seq):
+      raise ValueError("Must specify variant_id and seq")
+
+    a = self.fetch_allele(variant_id=variant_id, seq=seq)
+
+    if a != None:
+      raise ValueError("Allele exists where variant_id=%s, seq=%s" % (variant_id, seq))
+
+    self._c.execute("INSERT INTO alleles (variant_id, seq) VALUES (%s, %s)" % (variant_id, seq))
+
+    return self.fetch_allele(allele_id=self._c.lastrowid)
+
+  def fetch_mut(self, mut_id = None, tx_id = None, mut = None):
+    assert self._conn, self._c
+
+    if not ((mut_id and not mut) ^ tx_id)):
+      raise ValueError("Must specify either mut_id or tx_id")
+
+    if mut_id:
+      d = self._c.execute("SELECT * FROM muts WHERE mut_id = %s" % 
+        mut_id).fetchone()
+    elif tx_id and mut:
+      d = self._c.execute("SELECT * FROM muts WHERE tx_id = %s AND mut = '%s'" %
+        (tx_id, mut)).fetchone()
+    elif tx_id:
+      d = self._c.execute("SELECT * FROM muts WHERE tx_id = %s" %
+        tx_id).fetchone()
+
+    if d == None:
+      return None
+
+    m = Mutation(d["mut_id"])
+
+    m.allele_id = d["allele_id"]
+    m.tx_id = d["tx_id"]
+    m.mut = d["mut"]
+
+    return m
+
+  def new_mut(self, allele_id, tx_id, mut):
+    assert self._conn, self._c
+
+    if not (allele_id and tx_id and mut):
+      raise ValueError("Must specify allele_id, tx_id, and mut")
+
+    self._c.execute("INSERT INTO muts (allele_id, tx_id, mut) VALUES (%s, %s, '%s')" %
+      (allele_id, tx_id, mut))
+    m = self.fetch_mut(mut_id=self._c.lastrowid)
+
+    return m
+
+  def gene_names(self):
+    assert self._conn, self._c
+
+    genes = self._c.execute("SELECT name FROM genes").fetchall()
+
+    for g in genes:
+      yield g["name"]
+
+  def protein_to_gene(self, protein_name):
+    assert self._conn, self._c
+
+    genes = self._c.execute("SELECT genes.name AS g FROM genes, proteins, " \
+      "protein_to_tx, gene_to_tx WHERE proteins.name = '%s' AND " \
+      "proteins.protein_id = protein_to_tx.protein_id AND " \
+      "protein_to_tx.tx_id = gene_to_tx.tx_id AND " \
+      "genes.gene_id = gene_to_tx.gene_id GROUP BY g").fetchall()
+    genes = [x["g"] for x in genes]
+
+    return genes
+
+  ##
+  ## FILE LOADING METHODS
+  ##
 
   def load_annotation(self, ensgene, enst_to_gene_name, string_alias):
     assert self._conn, self._c
@@ -506,172 +860,6 @@ class VariantData:
 
     self.conn.commit()
     sys.stderr.write("\n")
-
-  def find_var_overlapping_tx(self):
-    assert self._conn, self._c
-
-    all_tx = self._c.execute("SELECT tx_id, chrom, txStart, txEnd FROM transcripts").fetchall()
-
-    for tx_id, chrom, tx_start, tx_end in all_tx:
-      all_vars = self._c.execute("SELECT variant_id FROM variants WHERE " \
-        "chrom = '%s' AND pos BETWEEN %s AND %s" % (chrom, tx_start, tx_end)).fetchall()
-
-      batch = [(tx_id, x["variant_id"]) for x in all_vars]
-
-      self._c.executemany("INSERT INTO tx_to_variant (tx_id, variant_id) VALUES (?, ?)", batch)
-
-  def fetch_gene(self, gene_name = None, gene_id = None):
-    assert self._conn, self._c
-
-    if not (gene_name ^ gene_id):
-      raise ValueError("Must specify either gene_name or gene_id")
-
-    if gene_id:
-      d = self._c.execute("SELECT * FROM genes WHERE gene_id = %s" % gene_id).fetchone()
-    elif gene_name:
-      d = self._c.execute("SELECT * FROM genes WHERE gene_name = %s" % gene_name).fetchone()
-
-    g = Gene(d["gene_id"], d["name"])
-
-    g.cent_score = d["cent_score"]
-    g.cent_perc = d["cent_perc"]
-    g.nn_score = d["nn_score"]
-    g.nn_perc = d["nn_perc"]
-
-    g.transcripts = {}
-
-    all_tx = self._c.execute("SELECT tx_id FROM gene_to_tx WHERE gene_id = '%s'" % g.gene_id).fetchall()
-
-    for tx_id in all_tx:
-      t = self.fetch_tx(tx_id=tx_id["tx_id"])
-
-      g.transcripts[t["name"]] = t
-
-  def fetch_tx(self, tx_name = None, tx_id = None):
-    assert self._conn, self._c
-
-    if not (tx_name ^ tx_id):
-      raise ValueError("Must specify either tx_name or tx_id")
-
-    if tx_id:
-      d = self._c.execute("SELECT * FROM transcripts WHERE tx_id = %s" % tx_id).fetchone()
-    elif tx_name:
-      d = self._c.execute("SELECT * FROM transcripts WHERE tx_name = %s" % tx_name).fetchone()
-
-    t = Transcript(d["tx_id"], d["name"])
-
-    t.bin = d["bin"]
-    t.chrom = d["chrom"]
-    t.tx_start = d["tx_start"]
-    t.tx_end = d["tx_end"]
-    t.cds_start = d["cds_start"]
-    t.cds_end = d["cds_end"]
-    t.exon_starts = d["exon_starts"]
-    t.exon_ends = d["exon"]
-
-    t.proteins = {}
-
-    all_prot = self._c.execute("SELECT protein_id FROM protein_to_tx WHERE tx_id = %s" % t.tx_id).fetchall()
-
-    for prot_id in all_prot:
-      p = self.fetch_protein(protein_id=prot_id["protein_id"])
-
-      t.proteins[p["name"]] = p
-
-    return t
-
-  def fetch_protein(self, protein_name = None, protein_id = None):
-    assert self._conn, self._c
-
-    if not (protein_name ^ protein_id):
-      raise ValueError("Must specify either protein_name or protein_id")
-
-    if protein_id:
-      d = self._c.execute("SELECT * FROM transcripts WHERE protein_id = %s" % protein_id).fetchone()
-    elif protein_name:
-      d = self._c.execute("SELECT * FROM transcripts WHERE protein_name = %s" % protein_name).fetchone()
-
-    p = Protein(d["protein_id"], d["name"])
-
-    return p
-
-  def fetch_variant(self, chrom = None, pos = None, variant_id = None):
-    assert self._conn, self._c
-
-    if not ((chrom and pos) ^ variant_id):
-      raise ValueError("Must specify either chrom and pos or variant_id")
-
-    if variant_id:
-      d = self._c.execute("SELECT * FROM variants WHERE variant_id = %s" % variant_id).fetchone()
-    elif chrom and pos:
-      d = self._c.execute("SELECT * FROM variants WHERE chrom = '%s' AND pos = %s" % (chrom, pos)).fetchone()
-
-    if d == None:
-      return None
-
-    v = Variant(d["variant_id"])
-
-    v.chrom = d["chrom"]
-    v.pos = d["pos"]
-    v.phylop = d["phylop"]
-    v.siphy = d["siphy"]
-
-    v.alleles = {}
-
-    all_alleles = self._c.execute("SELECT allele_id FROM alleles WHERE variant_id = '%s'" % v.variant_id).fetchall()
-
-    for allele_id in all_alleles:
-      a = self.fetch_allele(allele_id=allele_id["allele_id"])
-
-      v.alleles[a["sequence"]] = a
-
-    return v
-
-  def fetch_allele(self, chrom = None, pos = None, seq = None, allele_id = None):
-    assert self._conn, self._c
-
-    if not ((chrom and pos and seq) ^ allele_id):
-      raise ValueError("Must specify either chrom, pos and seq or allele_id")
-
-    if allele_id:
-      d = self._c.execute("SELECT * FROM alleles WHERE allele_id = %s" % 
-        allele_id).fetchone()
-    elif chrom and pos and seq:
-      d = self._c.execute("SELECT * FROM alleles WHERE chrom = '%s' AND " \
-        "pos = %s AND seq = '%s'" % (chrom, pos, seq)).fetchone()
-
-    a = Allele(d["allele_id"])
-
-    a.variant_id = d["variant_id"]
-    a.sequence = d["sequence"]
-    a.evs_af = d["evs_af"]
-    a.tgp_af = d["tgp_af"]
-    a.polyphen_hdiv = d["polyphen_hdiv"]
-    a.polyphen_hvar = d["polyphen_hvar"]
-    a.mut_taster = d["mut_taster"]
-    a.mut_assessor = d["mut_assessor"]
-
-    return a
-
-  def gene_names(self):
-    assert self._conn, self._c
-
-    genes = self._c.execute("SELECT name FROM genes").fetchall()
-
-    for g in genes:
-      yield g["name"]
-
-  def protein_to_gene(self, protein_name):
-    assert self._conn, self._c
-
-    genes = self._c.execute("SELECT genes.name AS g FROM genes, proteins, " \
-      "protein_to_tx, gene_to_tx WHERE proteins.name = '%s' AND " \
-      "proteins.protein_id = protein_to_tx.protein_id AND " \
-      "protein_to_tx.tx_id = gene_to_tx.tx_id AND " \
-      "genes.gene_id = gene_to_tx.gene_id GROUP BY g").fetchall()
-    genes = [x["g"] for x in genes]
-
-    return genes
 
 class GeneNetwork:
   def __init__(self, var_data):
