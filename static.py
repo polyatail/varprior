@@ -1,3 +1,4 @@
+import math
 from multiprocessing import Pool
 import numpy
 import scipy.stats
@@ -7,15 +8,6 @@ import os
 import sys
 import networkx
 import sqlite3
-
-# there should be a framework for accessing all this data that doesn't involve
-# executing SQL queries manually
-
-# load annotation
-# load variants from EVS
-# load variants from dbNSFP
-# load network
-# calculate gene network placement score
 
 class Gene:
   # contains a bunch of transcripts
@@ -51,6 +43,16 @@ class VariantData:
   def __init__(self, db_file):
     self.version = "variantdata-1.0"
     self.db_file = db_file
+
+  def load(self, ensgene, enst_to_gene_name, string_alias, evs_file, dbnsfp_file):
+    self.db_connect()
+    self.db_init()
+    self.load_annotation(ensgene, enst_to_gene_name, string_alias)
+    self.load_evs(evs_file)
+    self.load_dbnsfp(dbnsfp_file)
+
+    self.find_all_tx_var_overlaps()
+    self.db_metadata("update")
 
   ##
   ## DATABASE METHODS
@@ -637,7 +639,7 @@ class VariantData:
       chrom, pos = l[0].split(":")
       chrom = "chr%s" % chrom
 
-      #NOTE: here we convert 1-based to 0-based position
+      #NOTE: convert 1-based to 0-based position
       pos = int(pos) - 1
 
       try:
@@ -737,7 +739,7 @@ class VariantData:
 
       l = l.strip().split()
 
-      #NOTE: here we convert 1-based to 0-based position
+      #NOTE: convert 1-based to 0-based position
       pos = int(l[1]) - 1
       chrom = "chr%s" % l[0]
 
@@ -879,9 +881,6 @@ class GeneNetwork:
     self.gene_graph = networkx.read_gpickle(gpickle)
 
   def load_string_network(self, string_network_links):
-    # NOTE: scores are 1000 - the score so we can use shortest path algorithms
-    # NOTE: no multigraph -- instead update to keep edge weights minimum
-
     # generate STRING graph with gene names
     gene_graph = networkx.Graph(directed=False)
     sys.stderr.write("    nodes\n")
@@ -897,9 +896,11 @@ class GeneNetwork:
       gene2 = self.vd.protein_to_gene(line[1][5:])
 
       for node1, node2 in itertools.product(gene1, gene2):
+       #NOTE: scores subtracted from 1000 so we can use shortest path algorithms
         weight = 1000 - float(line[2])
 
         try:
+        #NOTE: no multigraph -- instead update to keep edge weights minimum
           if gene_graph[node1][node2]["weight"] > weight:
             gene_graph[node1][node2]["weight"] = weight
             continue
@@ -977,7 +978,7 @@ class GeneNetwork:
 
         try:
           path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
-        except (NetworkXNoPath, KeyError):
+        except (networkx.exception.NetworkXNoPath, KeyError):
           continue
 
         weights = []
@@ -987,6 +988,8 @@ class GeneNetwork:
 
         dist_to_top_genes.append(float(sum(weights)))
 
+      # harmonic centrality defines how well connected a gene is all puck genes
+      # nearest-neighobr defines how close a gene is to its nearest puck gene
       harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
       nearest_neighbor = sorted(dist_to_top_genes)[0]
 
@@ -995,15 +998,12 @@ class GeneNetwork:
     return (gene, harmonic_centrality, nearest_neighbor)
 
   def score_all_genes(self, graph):
-    # two scores:
-    # harmonic centrality defines how well connected a gene is all puck genes
-    # nearest-neighobr defines how close a gene is to its nearest puck gene
     p = Pool(NUM_PROCS)
     partial_score_gene = partial(self.score_gene, graph=graph, top_genes=self.top_genes)
     result = p.map(partial_score_gene, self.gene_names())
     p.close()
 
-    # and now go through and convert them all to percentiles
+    # convert them all to percentiles
     cent_hist = numpy.array([x[1] for x in result if x[1] != -1])
     nn_hist = numpy.array([x[2] for x in result if x[2] != -1])
 
@@ -1023,13 +1023,8 @@ class GeneNetwork:
         cent_perc = scipy.stats.percentileofscore(cent_hist, cent_score) / 100.0
         nn_perc = 1 - scipy.stats.percentileofscore(nn_hist, nn_score) / 100.0
 
-        print """
-gene:  %s
-  c:   %s
-  c_p: %s
-  n:   %s
-  n_p: %s
-""" % (gene, cent_score, cent_perc, nn_score, nn_perc)
+        print "gene:  %s\n  c:   %s\n  c_p: %s\n  n:   %s\n  n_p: %s\n" %
+          (gene, cent_score, cent_perc, nn_score, nn_perc)
 
       batch.append((cent_score, cent_perc, nn_score, nn_perc, gene))
 
