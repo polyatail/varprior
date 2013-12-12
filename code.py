@@ -1,3 +1,4 @@
+import bz2file
 import pysam
 import os
 import pyfasta
@@ -9,17 +10,6 @@ import scipy
 import time
 import itertools
 import sys
-
-def load_trio():
-  globals()["a"] = AnalyzeTrio(
-    {"mother": "jp-scid9b", "father": "jp-scid9c", "daughter": "jp-scid9a"},
-    "varprior.db",
-    "varprior.gpickle",
-    "data/hg19.fa",
-    "data/exomes_49.vcf",
-    "data/20130918_ensGene.tab", "data/20130918_ensemblToGeneName.tab",
-    "data/human-protein.aliases.v9.05.txt", "data/human-protein.links.v9.05.txt",
-    "data/evs.txt")
 
 ##
 ## AUXILIARY CLASSES
@@ -207,7 +197,12 @@ class AnalyzeTrio():
     processed = 0
     batch = []
 
-    for l in open(vcf_file):
+    if vcf_file.endswith(".bz2"):
+      f_iter = bz2file.BZ2File(vcf_file)
+    else:
+      f_iter = open(vcf_file)
+
+    for l in f_iter:
       # parse the header, find columns of interest
       if l.startswith("#"):
         if l.startswith("#CHROM"):
