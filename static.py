@@ -18,14 +18,12 @@ class Gene:
 
 class Transcript:
   # contains a bunch of proteins (in practice, only one)
-  def __init__(self, tx_id, tx_name):
+  def __init__(self, tx_id):
     self.tx_id = tx_id
-    self.tx_name = tx_name
 
 class Protein:
-  def __init__(self, protein_id, protein_name):
+  def __init__(self, protein_id):
     self.protein_id = protein_id
-    self.protein_name = protein_name
 
 class Variant:
   # contains a bunch of alleles
@@ -45,11 +43,25 @@ class VariantData:
     self.version = "variantdata-1.0"
     self.db_file = db_file
 
+    sys.stderr.write("VariantData: connecting to db\n")
+
+    if not os.path.isfile(db_file):
+      self.db_connect()
+    else:
+      self.db_connect()
+      self.db_metadata("check")
+
   def load(self, ensgene, enst_to_gene_name, string_alias, evs_file, dbnsfp_file):
-    self.db_connect()
-    #self.db_init()
-    #self.load_annotation(ensgene, enst_to_gene_name, string_alias)
-    #self.load_evs(evs_file)
+    sys.stderr.write("VariantData: initializing new db\n")
+    self.db_init()
+
+    sys.stderr.write("VariantData: loading annotation\n")
+    self.load_annotation(ensgene, enst_to_gene_name, string_alias)
+
+    sys.stderr.write("VariantData: loading EVS data\n")
+    self.load_evs(evs_file)
+
+    sys.stderr.write("VariantData: loading dbNSFP data\n")
     self.load_dbnsfp(dbnsfp_file)
 
     self.find_all_tx_var_overlaps()
@@ -168,34 +180,44 @@ class VariantData:
 
     self._conn.commit()
 
-  def db_metadata(self, action):
+  def db_metadata(self, action, update_literal=False):
     assert self._conn, self._c
 
     md = {"version": ("l", self.version),
-          "transcripts": ("q", "SELECT COUNT(*) FROM transcripts"),
-          "proteins": ("q", "SELECT COUNT(*) FROM proteins"),
-          "genes": ("q", "SELECT COUNT(*) FROM genes"),
-          "variants": ("q", "SELECT COUNT(*) FROM variants"),
-          "alleles": ("q", "SELECT COUNT(*) FROM alleles"),
-          "muts": ("q", "SELECT COUNT(*) FROM muts")}
+          "transcripts": ("q", "SELECT MAX(_ROWID_) FROM transcripts LIMIT 1"),
+          "proteins": ("q", "SELECT MAX(_ROWID_) FROM proteins LIMIT 1"),
+          "genes": ("q", "SELECT MAX(_ROWID_) FROM genes LIMIT 1"),
+          "variants": ("q", "SELECT MAX(_ROWID_) FROM variants LIMIT 1"),
+          "alleles": ("q", "SELECT MAX(_ROWID_) FROM alleles LIMIT 1"),
+          "muts": ("q", "SELECT MAX(_ROWID_) FROM muts LIMIT 1")}
 
     if action == "check":
       for k, q in md.items():
         md_v = self._c.execute("SELECT v FROM metadata WHERE k = '%s'" % k).fetchone()[0]
 
         if q[0] == "q":
-          ac_v = self._c.execute(q).fetchone()[0]
+          ac_v = self._c.execute(q[1]).fetchone()[0]
         elif q[0] == "l":
           ac_v = q[1]
 
-        if md_v != ac_v:
+        if str(md_v) != str(ac_v):
           raise ValueError("Invalid DB metadata (%s, %s != %s)" % (k, md_v, ac_v))
     elif action == "update":
       for k, q in md.items():
         if q[0] == "q":
-          ac_v = self._c.execute(q).fetchone()[0]
+          ac_v = self._c.execute(q[1]).fetchone()[0]
 
-          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (k, ac_v))
+          if ac_v == None:
+            ac_v = -1
+
+          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (ac_v, k))
+
+        if update_literal == True and \
+           q[0] == "l":
+
+          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (q[1], k))
+
+      self._conn.commit()
 
   def find_tx_overlapping_var(self, variant_id):
     assert self._conn, self._c
@@ -262,13 +284,21 @@ class VariantData:
   def find_all_tx_var_overlaps(self):
     assert self._conn, self._c
 
+    s_time = time.time()
+    processed = 0
+
     for t in self.fetch_all_tx():
       self.find_var_overlapping_tx(t.tx_id)
+
+      processed += 1
+      if processed % 100 == 0:
+        sys.stderr.write("\rprocessed %s @ %.02f/s" %
+          (processed, processed / (time.time() - s_time)))
 
   def fetch_gene(self, gene_name = None, gene_id = None):
     assert self._conn, self._c
 
-    if not (gene_name ^ gene_id):
+    if not (bool(gene_name) ^ bool(gene_id)):
       raise ValueError("Must specify either gene_name or gene_id")
 
     if gene_id:
@@ -306,7 +336,7 @@ class VariantData:
   def fetch_tx(self, tx_name = None, tx_id = None):
     assert self._conn, self._c
 
-    if not (tx_name ^ tx_id):
+    if not (bool(tx_name) ^ bool(tx_id)):
       raise ValueError("Must specify either tx_name or tx_id")
 
     if tx_id:
@@ -317,8 +347,9 @@ class VariantData:
     if d == None:
       return None
 
-    t = Transcript(d["tx_id"], d["name"])
+    t = Transcript(d["tx_id"])
 
+    t.name = d["name"]
     t.bin = d["bin"]
     t.chrom = d["chrom"]
     t.tx_start = d["tx_start"]
@@ -344,31 +375,33 @@ class VariantData:
 
     d = self._c.execute("SELECT tx_id FROM transcripts").fetchall()
 
-    for t in tx:
+    for t in d:
       yield self.fetch_tx(tx_id=t["tx_id"])
 
   def fetch_protein(self, protein_name = None, protein_id = None):
     assert self._conn, self._c
 
-    if not (protein_name ^ protein_id):
+    if not (bool(protein_name) ^ bool(protein_id)):
       raise ValueError("Must specify either protein_name or protein_id")
 
     if protein_id:
-      d = self._c.execute("SELECT * FROM transcripts WHERE protein_id = %s" % protein_id).fetchone()
+      d = self._c.execute("SELECT * FROM proteins WHERE protein_id = %s" % protein_id).fetchone()
     elif protein_name:
-      d = self._c.execute("SELECT * FROM transcripts WHERE protein_name = %s" % protein_name).fetchone()
+      d = self._c.execute("SELECT * FROM proteins WHERE protein_name = %s" % protein_name).fetchone()
 
     if d == None:
       return None
 
-    p = Protein(d["protein_id"], d["name"])
+    p = Protein(d["protein_id"])
+
+    p.name = d["name"]
 
     return p
 
   def fetch_variant(self, chrom = None, pos = None, variant_id = None):
     assert self._conn, self._c
 
-    if not ((chrom and pos) ^ variant_id):
+    if not ((bool(chrom) and bool(pos)) ^ bool(variant_id)):
       raise ValueError("Must specify either chrom and pos or variant_id")
 
     if variant_id:
@@ -408,7 +441,7 @@ class VariantData:
     if v != None:
       raise ValueError("Variant exists where chrom=%s, pos=%s" % (chrom, pos))
 
-    self._c.execute("INSERT INTO variants (chrom, pos) VALUES (%s, %s)" % (chrom, pos))
+    self._c.execute("INSERT INTO variants (chrom, pos) VALUES ('%s', %s)" % (chrom, pos))
     v = self.fetch_variant(variant_id=self._c.lastrowid)
     self.find_tx_overlapping_var(v.variant_id)
 
@@ -420,6 +453,7 @@ class VariantData:
     if not (chrom and start and end):
       raise ValueError("Must specify chrom, start, and end")
 
+
     d = self._c.execute("SELECT variant_id FROM variants WHERE chrom = '%s' " \
       "AND pos BETWEEN %s AND %s" % (chrom, start, end)).fetchall()
 
@@ -430,7 +464,7 @@ class VariantData:
   def fetch_allele(self, variant_id = None, seq = None, allele_id = None):
     assert self._conn, self._c
 
-    if not ((variant_id and seq) ^ allele_id):
+    if not ((bool(variant_id) and bool(seq)) ^ bool(allele_id)):
       raise ValueError("Must specify either variant_id and seq or allele_id")
 
     if allele_id:
@@ -438,7 +472,7 @@ class VariantData:
         allele_id).fetchone()
     elif variant_id and seq:
       d = self._c.execute("SELECT * FROM alleles WHERE variant_id = %s AND " \
-        "seq = '%s'" % (variant_id, seq)).fetchone()
+        "sequence = '%s'" % (variant_id, seq)).fetchone()
 
     if d == None:
       return None
@@ -476,14 +510,14 @@ class VariantData:
     if a != None:
       raise ValueError("Allele exists where variant_id=%s, seq=%s" % (variant_id, seq))
 
-    self._c.execute("INSERT INTO alleles (variant_id, seq) VALUES (%s, %s)" % (variant_id, seq))
+    self._c.execute("INSERT INTO alleles (variant_id, sequence) VALUES (%s, '%s')" % (variant_id, seq))
 
     return self.fetch_allele(allele_id=self._c.lastrowid)
 
   def fetch_mut(self, mut_id = None, tx_id = None, mut = None):
     assert self._conn, self._c
 
-    if not ((mut_id and not mut) ^ tx_id):
+    if not ((bool(mut_id) and not bool(mut)) ^ bool(tx_id)):
       raise ValueError("Must specify either mut_id or tx_id")
 
     if mut_id:
@@ -561,8 +595,8 @@ class VariantData:
     s_time = time.time()
     processed = 0
     batch = []
-    db_cols = ", ".join(("name", "tx_start", "tx_end", "exon_starts", "exon_ends", "cds_start", "cds_end"))
-    eg_cols = ("name", "txStart", "txEnd", "exonStarts", "exonEnds", "cdsStart", "cdsEnd")
+    db_cols = ", ".join(("name", "bin", "chrom", "tx_start", "tx_end", "exon_starts", "exon_ends", "cds_start", "cds_end"))
+    eg_cols = ("name", "bin", "chrom", "txStart", "txEnd", "exonStarts", "exonEnds", "cdsStart", "cdsEnd")
     p_cols = ", ".join(["?" for _ in eg_cols])
 
     for l in open(ensgene, "r"):

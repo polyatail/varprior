@@ -24,7 +24,7 @@ class VCFEntry():
 ##
 
 class AnalyzeTrio():
-  def __init__(self, db_file, vcf_file, genome_fasta, pedigree):
+  def __init__(self, variantdata, db_file, vcf_file, genome_fasta, pedigree):
     self.version = "analyzetrio-1.0"
     self.weights = {"mendel": 1,
                     "nonsyn": 3,
@@ -35,6 +35,8 @@ class AnalyzeTrio():
                     "net_nn": 1}
     self.exome_size = 30 * 10 ** 6
 
+    self.vd = variantdata
+
     self.db_file = db_file
     self.vcf_file = vcf_file
     self.genome_fasta = genome_fasta
@@ -43,21 +45,27 @@ class AnalyzeTrio():
     self.stripped_pedigree = dict([(x, y.replace("-", "")) for \
                                    x, y in pedigree.items()])
 
-    sys.stderr.write("loading genome\n")
+    sys.stderr.write("AnalyzeTrio: loading genome\n")
     self.load_genome()
 
-    sys.stderr.write("loading db\n")
+    sys.stderr.write("AnalyzeTrio: connecting to db\n")
 
     if not os.path.isfile(self.db_file):
       self.db_connect()
+
+      sys.stderr.write("AnalyzeTrio: initializing new db\n")
       self.db_init()
 
-      sys.stderr.write("loading vcf\n")
-      self.load_vcf()
-      self.db_metadata("update")
+      sys.stderr.write("AnalyzeTrio: loading VCF\n")
+      self.load_vcf(vcf_file)
+
+      sys.stderr.write("AnalyzeTrio: running mendelian filter\n")
+      self.populate_mendel()
+
+      self.db_metadata("update", update_literal=True)
     else:
       self.db_connect()
-      self.db_metadata("check")
+#      self.db_metadata("check")
 
   ##
   ## DATABASE METHODS
@@ -77,8 +85,10 @@ class AnalyzeTrio():
                                 ("v", "text"))}
 
     tables["vcf"] = {"f": (("vcf_id", "integer primary key"),
-                           ("variant_id", "int")),
-                     "i": ("vcf_id", "variant_id")}
+                           ("variant_id", "int"),
+                           ("chrom", "text"),
+                           ("pos", "int")),
+                     "i": ("vcf_id", "variant_id", ("chrom", "pos"))}
 
     tables["mendel"] = {"f": (("mendel_id", "integer primary key"),
                               ("tx_id", "int"),
@@ -86,13 +96,14 @@ class AnalyzeTrio():
                               ("allele_id1", "int"),
                               ("allele_id2", "int")),
                         "i": ("mendel_id", "tx_id")}
+
     inserts = {}
 
     inserts["metadata"] = {"f": ("k", "v"),
                            "r": (("version", self.version),
                                  ("vcf_file", "-1"),
                                  ("vcf_count", "-1"),
-                                 ("mendel_count", "-1"),
+                                 ("mendel_count", "-1"))}
 
     for t in tables:
       f = ["%s %s" % (x, y) for x, y in tables[t]["f"]]
@@ -117,36 +128,45 @@ class AnalyzeTrio():
 
     self._conn.commit()
 
-  def db_metadata(self, action):
+  def db_metadata(self, action, update_literal=False):
     assert self._conn, self._c
 
     md = {"version": ("l", self.version),
           "vcf_file": ("l", self.vcf_file),
-          "vcf_count": ("q", "SELECT COUNT(*) FROM vcf"),
-          "mendel_count": ("q", "SELECT COUNT(*) FROM mendel")}
+          "vcf_count": ("q", "SELECT MAX(_ROWID_) FROM vcf LIMIT 1"),
+          "mendel_count": ("q", "SELECT MAX(_ROWID_) FROM mendel LIMIT 1")}
 
     if action == "check":
       for k, q in md.items():
         md_v = self._c.execute("SELECT v FROM metadata WHERE k = '%s'" % k).fetchone()[0]
 
         if q[0] == "q":
-          ac_v = self._c.execute(q).fetchone()[0]
+          ac_v = self._c.execute(q[1]).fetchone()[0]
         elif q[0] == "l":
           ac_v = q[1]
 
-        if md_v != ac_v:
+        if str(md_v) != str(ac_v):
           raise ValueError("Invalid DB metadata (%s, %s != %s)" % (k, md_v, ac_v))
     elif action == "update":
       for k, q in md.items():
         if q[0] == "q":
-          ac_v = self._c.execute(q).fetchone()[0]
+          ac_v = self._c.execute(q[1]).fetchone()[0]
 
-          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (k, ac_v))
+          if ac_v == None:
+            ac_v = -1
+
+          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (ac_v, k))
+
+        if update_literal == True and \
+           q[0] == "l":
+          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (q[1], k))
+
+      self._conn.commit()
 
   def fetch_vcf(self, vcf_id = None, variant_id = None):
     assert self._conn, self._c
 
-    if not (vcf_id ^ variant_id):
+    if not (bool(vcf_id) ^ bool(variant_id)):
       raise ValueError("Must specify either vcf_id or variant_id")
 
     if variant_id:
@@ -162,17 +182,22 @@ class AnalyzeTrio():
     v.variant_id = d["variant_id"]
     v.samples = {}
 
-    for k, v in d.items():
+    for k in d.keys():
       if k not in ("vcf_id", "variant_id"):
-        v.samples[k] = v
+        v.samples[k] = d[k]
 
     return v
 
   def fetch_vcf_overlapping(self, chrom, start, end):
     assert self._conn, self._c
 
-    vd_d = self.vd.fetch_variant_overlapping(chrom, start, end)
-    vcf = [self.fetch_vcf(variant_id=x) for x in vd_d]
+    if not (chrom and start and end):
+      raise ValueError("Must specify chrom, start, and end")
+
+    d = self._c.execute("SELECT vcf_id FROM vcf WHERE chrom = '%s' " \
+      "AND pos BETWEEN %s AND %s" % (chrom, start, end)).fetchall() 
+
+    vcf = [self.fetch_vcf(vcf_id=x["vcf_id"]) for x in d]
 
     return vcf
 
@@ -185,7 +210,7 @@ class AnalyzeTrio():
                          record_class=pyfasta.records.MutNpyFastaRecord)
 
   def load_vcf(self, vcf_file):
-    assert self.conn, self.c
+    assert self._conn, self._c
 
     # has the table already been loaded?
     md_v = self._c.execute("SELECT v FROM metadata WHERE k = 'vcf_count'").fetchone()[0]
@@ -209,10 +234,12 @@ class AnalyzeTrio():
           header = l.strip().split()
 
           kept_cols = []
-          cols = ["variant_id"]
+          cols = ["variant_id", "chrom", "pos"]
 
           for i, n in enumerate(header):
-            if n.startswith("jp"):
+            if i > 31:
+              n = n.replace("-", "")
+
               cols.extend(["%s_1" % n, "%s_2" % n, "%s_QV" % n])
               kept_cols.append((i, n))
 
@@ -240,12 +267,13 @@ class AnalyzeTrio():
         f_data = l[i].split(":")
 
         col_data = dict(zip(f_names, f_data))
-        col_data["GT"] = [code[x] for x in col_data["GT"].split("/", 1)]
-
-        alleles.extend(col_data["GT"])
 
         if "." in col_data["GT"]:
           break
+
+        col_data["GT"] = [code[x] for x in col_data["GT"].split("/", 1)]
+
+        alleles.extend(col_data["GT"])
 
         samples[n] = col_data
       else:
@@ -264,13 +292,13 @@ class AnalyzeTrio():
           self.nonsyn_native(variant_id=v.variant_id)
         else:
           # match sure every allele is represented
-          v_alleles = [a.sequence for a in v]
+          v_alleles = [a for a in v.alleles]
           new_alleles = set(alleles).difference(v_alleles)
 
           # add those that aren't
           for a in new_alleles:
-            a_id = self.vd.new_allele(v.variant_id, a)
-            self.nonsyn_native(allele_id=a_id)
+            a_obj = self.vd.new_allele(v.variant_id, a)
+            self.nonsyn_native(allele_id=a_obj.allele_id)
 
         # fetch the updated variant
         v = self.vd.fetch_variant(chrom, pos)
@@ -280,31 +308,30 @@ class AnalyzeTrio():
         for a_seq, a_obj in v.alleles.items():
           seq_to_allele_id[a_seq] = a_obj.allele_id
 
-        row = [v.variant_id]
+        row = [v.variant_id, chrom, pos]
 
         for _, n in kept_cols:
-          row.append(seq_to_allele_id[samples[n]["GT"][0]],
-                     seq_to_allele_id[samples[n]["GT"][1]],
-                     samples[n]["GQ"] if "GQ" in samples[n] else "0")
+          row.extend((seq_to_allele_id[samples[n]["GT"][0]],
+                      seq_to_allele_id[samples[n]["GT"][1]],
+                      samples[n]["GQ"] if "GQ" in samples[n] else "0"))
 
         batch.append(row)
         processed += 1
 
       if processed % 100 == 0:
-        self.c.executemany("INSERT INTO vcf (%s) VALUES (%s)" %
+        self._c.executemany("INSERT INTO vcf (%s) VALUES (%s)" %
           (", ".join(["'%s'" % x for x in cols]),
            ", ".join(["?" for _ in cols])), batch)
-        self.conn.commit()
+        self._conn.commit()
         batch = []
         sys.stderr.write("\rprocessed %s @ %.02f/s" %
           (processed, processed / (time.time() - s_time)))
 
-    self.c.executemany("INSERT INTO vcf (%s) VALUES (%s)" %
+    self._c.executemany("INSERT INTO vcf (%s) VALUES (%s)" %
       (", ".join(["'%s'" % x for x in cols]),
        ", ".join(["?" for _ in cols])), batch)
-    self.conn.commit()
-    sys.stderr.write("\rprocessed %s @ %.02f/s" %
-      (processed, processed / (time.time() - s_time)))
+    self._conn.commit()
+    sys.stderr.write("\n")
 
   ##
   ## INHERITANCE FILTER METHODS
@@ -324,9 +351,9 @@ class AnalyzeTrio():
           try:
             var[i] = [pos[i].samples["%s%s" % (self.stripped_pedigree[name], x)] for x in ("_1", "_2")]
           except KeyError:
-            var[i] = None
+            pass
       else:
-        assert son ^ daughter
+        assert bool(son) ^ bool(daughter)
 
         result = m_filter(mother, father, son, daughter)
 
@@ -468,7 +495,7 @@ class AnalyzeTrio():
         coding_exons.append((start, end))
       else:
         # exon occurs before coding start
-        if end < d.cds_start
+        if end < d.cds_start:
           continue
         # edge case: exon contains coding start AND end
         elif start <= d.cds_start < end and \
@@ -584,7 +611,7 @@ class AnalyzeTrio():
   ##
 
   def nonsyn_native(self, variant_id = None, allele_id = None):
-    if not (variant_id ^ allele_id):
+    if not (bool(variant_id) ^ bool(allele_id)):
       raise ValueError("Must specify variant_id or allele_id")
 
     if variant_id:
@@ -692,7 +719,8 @@ class AnalyzeTrio():
     for t in self.vd.fetch_all_tx():
       xlinked, comphet, recessive, dominant = [], [], [], []
 
-      if t.chrom == "chrX":
+      if t.chrom == "chrX" and \
+         "son" in self.pedigree:
         xlinked = self.mendelian_filter(self._mf_xlinked, t.chrom,
           t.tx_start, t.tx_end)
 
@@ -718,14 +746,14 @@ class AnalyzeTrio():
       processed += 1
 
       if processed % 100 == 0:
-        self.c.executemany("INSERT INTO mendel (tx_id, model, allele_id1, " \
+        self._c.executemany("INSERT INTO mendel (tx_id, model, allele_id1, " \
           "allele_id2) VALUES (?, ?, ?, ?)", batch)
-        self.conn.commit()
+        self._conn.commit()
         batch = []
         sys.stderr.write("\rprocessed %s @ %.02f/s" %
           (processed, processed / (time.time() - s_time)))
 
-    self.c.executemany("INSERT INTO mendel (tx_id, model, allele_id1, " \
+    self._c.executemany("INSERT INTO mendel (tx_id, model, allele_id1, " \
       "allele_id2) VALUES (?, ?, ?, ?)", batch)
-    self.conn.commit()
+    self._conn.commit()
     sys.stderr.write("\n")
