@@ -12,9 +12,8 @@ import sqlite3
 
 class Gene:
   # contains a bunch of transcripts
-  def __init__(self, gene_id, gene_name):
+  def __init__(self, gene_id):
     self.gene_id = gene_id
-    self.gene_name = gene_name
 
 class Transcript:
   # contains a bunch of proteins (in practice, only one)
@@ -309,8 +308,9 @@ class VariantData:
     if d == None:
       return None
 
-    g = Gene(d["gene_id"], d["name"])
+    g = Gene(d["gene_id"])
 
+    g.name = d["name"]
     g.cent_score = d["cent_score"]
     g.cent_perc = d["cent_perc"]
     g.nn_score = d["nn_score"]
@@ -324,6 +324,8 @@ class VariantData:
       t = self.fetch_tx(tx_id=tx_id["tx_id"])
 
       g.transcripts[t.name] = t
+
+    return g
 
   def fetch_all_genes(self):
     assert self._conn, self._c

@@ -1,3 +1,7 @@
+import base64
+import cPickle
+import tempfile
+import subprocess
 import bz2file
 import pysam
 import os
@@ -15,7 +19,7 @@ import sys
 ## AUXILIARY CLASSES
 ##
 
-class VCFEntry():
+class VCFEntry(object):
   def __init__(self, vcf_id):
     self.vcf_id = vcf_id
 
@@ -23,8 +27,8 @@ class VCFEntry():
 ## MAIN CLASS
 ##
 
-class AnalyzeTrio():
-  def __init__(self, variantdata, db_file, vcf_file, genome_fasta, pedigree):
+class AnalyzeTrio(object):
+  def __init__(self, variantdata, db_file):
     self.version = "analyzetrio-1.0"
     self.weights = {"mendel": 1,
                     "nonsyn": 3,
@@ -36,36 +40,45 @@ class AnalyzeTrio():
     self.exome_size = 30 * 10 ** 6
 
     self.vd = variantdata
-
     self.db_file = db_file
-    self.vcf_file = vcf_file
-    self.genome_fasta = genome_fasta
-
-    self.pedigree = pedigree
-    self.stripped_pedigree = dict([(x, y.replace("-", "")) for \
-                                   x, y in pedigree.items()])
-
-    sys.stderr.write("AnalyzeTrio: loading genome\n")
-    self.load_genome()
 
     sys.stderr.write("AnalyzeTrio: connecting to db\n")
 
     if not os.path.isfile(self.db_file):
       self.db_connect()
-
-      sys.stderr.write("AnalyzeTrio: initializing new db\n")
-      self.db_init()
-
-      sys.stderr.write("AnalyzeTrio: loading VCF\n")
-      self.load_vcf(vcf_file)
-
-      sys.stderr.write("AnalyzeTrio: running mendelian filter\n")
-      self.populate_mendel()
-
-      self.db_metadata("update", update_literal=True)
     else:
       self.db_connect()
-#      self.db_metadata("check")
+      self.db_metadata("check")
+
+      if bool(self.pedigree):
+        self.stripped_pedigree = dict([(x, y.replace("-", "")) for \
+                                      x, y in self.pedigree.items()])
+
+      sys.stderr.write("AnalyzeTrio: loading genome\n")
+      self.load_genome()
+
+  def load(self, genome_fasta, vcf_file):
+    sys.stderr.write("AnalyzeTrio: initializing new db\n")
+    self.db_init()
+
+    sys.stderr.write("AnalyzeTrio: loading genome\n")
+    self.genome_fasta = genome_fasta
+    self.load_genome()
+
+    sys.stderr.write("AnalyzeTrio: loading VCF\n")
+    self.vcf_file = vcf_file
+    self.load_vcf()
+
+    self.db_metadata("update", update_literal=True)
+
+  def load_pedigree(self, pedigree):
+    self.pedigree = pedigree
+    self.stripped_pedigree = dict([(x, y.replace("-", "")) for \
+                                   x, y in self.pedigree.items()])
+
+    self._c.execute("DELETE FROM mendel")
+    self.populate_mendel()
+    self.db_metadata("update", update_literal=True)
 
   ##
   ## DATABASE METHODS
@@ -101,6 +114,8 @@ class AnalyzeTrio():
 
     inserts["metadata"] = {"f": ("k", "v"),
                            "r": (("version", self.version),
+                                 ("pedigree", None),
+                                 ("genome_fasta", "-1"),
                                  ("vcf_file", "-1"),
                                  ("vcf_count", "-1"),
                                  ("mendel_count", "-1"))}
@@ -131,8 +146,10 @@ class AnalyzeTrio():
   def db_metadata(self, action, update_literal=False):
     assert self._conn, self._c
 
-    md = {"version": ("l", self.version),
-          "vcf_file": ("l", self.vcf_file),
+    md = {"version": ("l", "version"),
+          "genome_fasta": ("u", "genome_fasta"),
+          "vcf_file": ("u", "vcf_file"),
+          "pedigree": ("p", "pedigree"),
           "vcf_count": ("q", "SELECT MAX(_ROWID_) FROM vcf LIMIT 1"),
           "mendel_count": ("q", "SELECT MAX(_ROWID_) FROM mendel LIMIT 1")}
 
@@ -140,12 +157,19 @@ class AnalyzeTrio():
       for k, q in md.items():
         md_v = self._c.execute("SELECT v FROM metadata WHERE k = '%s'" % k).fetchone()[0]
 
-        if q[0] == "q":
+        if q[0] == "u": # update
+          self.__dict__[q[1]] = str(md_v)
+          continue
+        elif q[0] == "p": # update, pickled
+          self.__dict__[q[1]] = md_v if md_v == None else cPickle.loads(base64.b64decode(md_v))
+          continue
+        elif q[0] == "q": # check against query
           ac_v = self._c.execute(q[1]).fetchone()[0]
-        elif q[0] == "l":
-          ac_v = q[1]
+        elif q[0] == "l": # check against literal
+          ac_v = self.__dict__[q[1]]
 
-        if str(md_v) != str(ac_v):
+        if (md_v == None and str(ac_v) != -1) or \
+           str(md_v) != str(ac_v):
           raise ValueError("Invalid DB metadata (%s, %s != %s)" % (k, md_v, ac_v))
     elif action == "update":
       for k, q in md.items():
@@ -158,8 +182,13 @@ class AnalyzeTrio():
           self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (ac_v, k))
 
         if update_literal == True and \
-           q[0] == "l":
-          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (q[1], k))
+           q[0] in ("l", "u", "p"):
+          if q[0] == "p":
+            new_v = base64.b64encode(cPickle.dumps(self.__dict__[q[1]], protocol=cPickle.HIGHEST_PROTOCOL))
+          else:
+            new_v = self.__dict__[q[1]]
+
+          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (new_v, k))
 
       self._conn.commit()
 
@@ -209,7 +238,7 @@ class AnalyzeTrio():
     self.pyf_genome = pyfasta.Fasta(self.genome_fasta,
                          record_class=pyfasta.records.MutNpyFastaRecord)
 
-  def load_vcf(self, vcf_file):
+  def load_vcf(self):
     assert self._conn, self._c
 
     # has the table already been loaded?
@@ -222,10 +251,10 @@ class AnalyzeTrio():
     processed = 0
     batch = []
 
-    if vcf_file.endswith(".bz2"):
-      f_iter = bz2file.BZ2File(vcf_file)
+    if self.vcf_file.endswith(".bz2"):
+      f_iter = bz2file.BZ2File(self.vcf_file)
     else:
-      f_iter = open(vcf_file)
+      f_iter = open(self.vcf_file)
 
     for l in f_iter:
       # parse the header, find columns of interest
@@ -323,6 +352,7 @@ class AnalyzeTrio():
           (", ".join(["'%s'" % x for x in cols]),
            ", ".join(["?" for _ in cols])), batch)
         self._conn.commit()
+        self.vd._conn.commit()
         batch = []
         sys.stderr.write("\rprocessed %s @ %.02f/s" %
           (processed, processed / (time.time() - s_time)))
@@ -331,6 +361,10 @@ class AnalyzeTrio():
       (", ".join(["'%s'" % x for x in cols]),
        ", ".join(["?" for _ in cols])), batch)
     self._conn.commit()
+    self.vd._conn.commit()
+
+    self.vd.db_metadata("update")
+
     sys.stderr.write("\n")
 
   ##
@@ -575,6 +609,65 @@ class AnalyzeTrio():
 
     return all_af
 
+  @staticmethod
+  def af_from_vcf(vcf_file):
+    # allele frequencies from any given vcf
+    af_table = {}
+
+    if vcf_file.endswith("bz2"):
+      vcftools_in = tempfile.NamedTemporaryFile(delete=False)
+
+      for l in bz2file.BZ2File(vcf_file):
+        vcftools_in.write(l)
+
+      vcftools_in.close()
+      vcf_file = vcftools_in.name
+
+    vcftools_out = tempfile.NamedTemporaryFile(delete=False)
+    
+    vcftools = subprocess.Popen(["vcftools", "--vcf", vcf_file,
+                                 "--freq", "--out", vcftools_out.name],
+                                stdout=open(os.devnull))
+    
+    while vcftools.poll() == None:
+      time.sleep(0.01)
+
+    if os.path.isfile("%s.frq" % vcftools_out.name):
+      with open("%s.frq" % vcftools_out.name) as fp:
+        fp.next()
+        
+        for l in fp:
+          l = l.strip().split()
+        
+          chrom = "chr%s" % l[0]
+          pos = int(l[1])
+
+          try:
+            af_table[chrom]
+          except KeyError:
+            af_table[chrom] = {}
+
+          try:
+            af_table[chrom][pos]
+          except KeyError:
+            af_table[chrom][pos] = {}
+
+          for allele, freq in [x.split(":") for x in l[4:]]:
+            af_table[chrom][pos][allele] = float(freq)
+
+      os.unlink("%s.frq" % vcftools_out.name)
+
+    os.unlink("%s.vcfidx" % vcf_file)
+    os.unlink("%s.log" % vcftools_out.name)
+    os.unlink(vcftools_out.name)
+
+    try:
+      os.unlink(vcftools_in.name)
+    except NameError:
+      pass
+
+    return af_table
+
   ##
   ## STATISTICS METHODS
   ##
@@ -639,16 +732,19 @@ class AnalyzeTrio():
   ##
 
   def score_genes(self):
+    # load local allele frequencies
+    #self.local_af = self.af_from_vcf(self.vcf_file)
+
     # how many recessive, dominant, and comphet models are there
     mendel_counts = {}
 
-    mendel_counts["xlinked"] = self.c.execute(
+    mendel_counts["xlinked"] = self._c.execute(
       "SELECT COUNT(*) FROM mendel WHERE model = 'xlinked'").fetchone()[0]
-    mendel_counts["recessive"] = self.c.execute(
+    mendel_counts["recessive"] = self._c.execute(
       "SELECT COUNT(*) FROM mendel WHERE model = 'recessive'").fetchone()[0]
-    mendel_counts["dominant"] = self.c.execute(
+    mendel_counts["dominant"] = self._c.execute(
       "SELECT COUNT(*) FROM mendel WHERE model = 'dominant'").fetchone()[0]
-    mendel_counts["comphet"] = self.c.execute(
+    mendel_counts["comphet"] = self._c.execute(
       "SELECT COUNT(*) FROM mendel WHERE model = 'comphet'").fetchone()[0]
 
     # for every gene
@@ -656,13 +752,13 @@ class AnalyzeTrio():
       tx_scores = []
 
       # take the best-scoring tx for this gene
-      for t in g.transcripts:
+      for t in g.transcripts.values():
         tx_score = {}
-        tx_size = sum([(y - x) for x, y in zip(t.exon_starts, t.exon_ends)])
+        tx_size = sum([(int(y) - int(x)) for x, y in zip(t.exon_starts, t.exon_ends)])
 
         models = self._c.execute("SELECT * FROM mendel WHERE tx_id = %s" % t.tx_id).fetchall()
 
-        if models == None:
+        if len(models) == 0:
           continue
 
         # take the best-scoring model for this tx
@@ -682,15 +778,15 @@ class AnalyzeTrio():
 
           # local af
           for i in m_a:
-            m_a[i].local_af = self.local_af[m_v[i].chrom][m_v[i].pos][m_a[i].sequence]
+            m_a[i].local_af = 1#self.local_af[m_v[i].chrom][m_v[i].pos][m_a[i].sequence]
 
           ni_T = self.exome_size / tx_size
-          ni_lambda = mendel_counts[model["model"]] / ni_T
+          ni_lambda = mendel_counts[m["model"]] / ni_T
           model_score["mendel"] = self.newell_ikeda(1, ni_lambda, ni_T, 1)
 
           model_score["nonsyn"] = sum([1 for a in m_a.values() if a.muts]) / float(len(m_a))
           model_score["local_af"] = reduce(lambda x, y: x*y, [a.local_af for a in m_a.values()])
-          model_score["global_af"] = reduce(lambda x, y: x*y,[a.evs_af for a in m_a.values()])
+          model_score["global_af"] = reduce(lambda x, y: x*y, [a.evs_af if bool(a.evs_af) else 0 for a in m_a.values()])
           model_score["qv"] = sum([v.samples["%s_QV" % n] for v in m_vcf.values() \
             for n in self.stripped_pedigree.values()]) / (594.0 if m["model"] == "comphet" else 297.0)
 
@@ -704,14 +800,14 @@ class AnalyzeTrio():
       else:
         best_tx_score = sorted(tx_scores, key=lambda x: x[0])[-1][1]
 
-      best_tx_score["net_cent"] = cent_perc
-      best_tx_score["net_nn"] = nn_perc
+      best_tx_score["net_cent"] = 1#g.cent_perc
+      best_tx_score["net_nn"] = 1#g.nn_perc
 
       gene_score = self.wsm(best_tx_score)
 
-      print gene, gene_score, best_tx_score
+      print g.name, gene_score, best_tx_score
 
-  def populate_mendel(self):
+  def populate_mendel(self, pedigree):
     s_time = time.time()
     processed = 0
     batch = []
