@@ -57,7 +57,7 @@ class AnalyzeTrio(object):
       sys.stderr.write("AnalyzeTrio: loading genome\n")
       self.load_genome()
 
-  def load(self, genome_fasta, vcf_file):
+  def load(self, vcf_file, genome_fasta):
     sys.stderr.write("AnalyzeTrio: initializing new db\n")
     self.db_init()
 
@@ -680,11 +680,10 @@ class AnalyzeTrio(object):
 
   def wpm(self, score_dict):
     # from http://en.wikipedia.org/wiki/Weighted_product_model
-    # return weighted product score, combining scores with self.weights
     total_score = 1
 
     for k, v in score_dict.items():
-      if not k.startswith("_"):
+      if k in self.weights:
         total_score *= float(v) ** self.weights[k]
 
     return total_score
@@ -694,7 +693,7 @@ class AnalyzeTrio(object):
     total_score = []
 
     for k, v in score_dict.items():
-      if not k.startswith("_"):
+      if k in self.weights:
         total_score.append(float(v) * self.weights[k])
 
     return sum(total_score)
@@ -732,6 +731,8 @@ class AnalyzeTrio(object):
   ##
 
   def score_genes(self):
+    mult = lambda x: reduce(lambda x, y: x*y, x)
+
     # load local allele frequencies
     #self.local_af = self.af_from_vcf(self.vcf_file)
 
@@ -785,11 +786,13 @@ class AnalyzeTrio(object):
           model_score["mendel"] = self.newell_ikeda(1, ni_lambda, ni_T, 1)
 
           model_score["nonsyn"] = sum([1 for a in m_a.values() if a.muts]) / float(len(m_a))
-          model_score["local_af"] = reduce(lambda x, y: x*y, [a.local_af for a in m_a.values()])
-          model_score["global_af"] = reduce(lambda x, y: x*y, [a.evs_af if bool(a.evs_af) else 0 for a in m_a.values()])
+          model_score["phastcons"] = mult([v.phastcons if v.phastcons else 0 for v in m_v.values()])
+          model_score["local_af"] = mult([a.local_af for a in m_a.values()])
+          model_score["global_af"] = mult([a.evs_af if a.evs_af else 0 for a in m_a.values()])
           model_score["qv"] = sum([v.samples["%s_QV" % n] for v in m_vcf.values() \
             for n in self.stripped_pedigree.values()]) / (594.0 if m["model"] == "comphet" else 297.0)
 
+          if model_score["phastcons"] != 0: import pdb; pdb.set_trace()
           model_scores.append((self.wsm(model_score), model_score))
 
         best_model_score = sorted(model_scores, key=lambda x: x[0])[-1]

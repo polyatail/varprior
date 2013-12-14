@@ -10,34 +10,34 @@ import sys
 import networkx
 import sqlite3
 
-class Gene:
+class Gene(object):
   # contains a bunch of transcripts
   def __init__(self, gene_id):
     self.gene_id = gene_id
 
-class Transcript:
+class Transcript(object):
   # contains a bunch of proteins (in practice, only one)
   def __init__(self, tx_id):
     self.tx_id = tx_id
 
-class Protein:
+class Protein(object):
   def __init__(self, protein_id):
     self.protein_id = protein_id
 
-class Variant:
+class Variant(object):
   # contains a bunch of alleles
   def __init__(self, variant_id):
     self.variant_id = variant_id
 
-class Allele:
+class Allele(object):
   def __init__(self, allele_id):
     self.allele_id = allele_id
 
-class Mutation:
+class Mutation(object):
   def __init__(self, mut_id):
     self.mut_id = mut_id
 
-class VariantData:
+class VariantData(object):
   def __init__(self, db_file):
     self.version = "variantdata-1.0"
     self.db_file = db_file
@@ -418,6 +418,7 @@ class VariantData:
 
     v.chrom = d["chrom"]
     v.pos = d["pos"]
+    v.phastcons = d["phastcons"]
     v.phylop = d["phylop"]
     v.siphy = d["siphy"]
 
@@ -838,16 +839,22 @@ class VariantData:
               "WHERE allele_id = %s" % (d_a["tgp_af"], d_a["pp_hdiv"],
               d_a["pp_hvar"], d_a["mut_taster"], d_a["mut_assessor"], allele_id))
 
-          for tx in d_a["tx"]:
-            tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = '%s'" % tx).fetchone()
-
-            if tx_id == None:
-              continue
-
-            tx_id = tx_id[0]
-
-            self._c.execute("INSERT INTO muts (allele_id, tx_id, mut) VALUES " \
-              "(%s, %s, '%s')" % (allele_id, tx_id, d_a["mut"]))
+          if d_a["aaref"] != d_a["aaalt"] and \
+             d_a["aaref"] != "." and \
+             d_a["aaalt"] != "." and \
+             d_a["aapos"] != "-1":
+            for tx, mutpos in zip(d_a["tx"], d_a["aapos"]):
+              tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = '%s'" % tx).fetchone()
+  
+              if tx_id == None:
+                continue
+  
+              tx_id = tx_id[0]
+  
+              mut = "".join([d_a["aaref"], mutpos, d_a["aaalt"]])
+  
+              self._c.execute("INSERT INTO muts (allele_id, tx_id, mut) VALUES " \
+              "(%s, %s, '%s')" % (allele_id, tx_id, mut))
 
         processed += 1
         if processed % 100 == 0:
@@ -934,7 +941,9 @@ class VariantData:
         dbnsfp[pos]["alleles"][l[3]]
       except KeyError:
         dbnsfp[pos]["alleles"][l[3]] = {"tx": l[19].split(";"),
-                                        "mut": "".join([l[4], l[20], l[5]])}
+                                        "aaref": l[4],
+                                        "aaalt": l[5],
+                                        "aapos": l[20].split(";")}
 
         try:
           dbnsfp[pos]["alleles"][l[3]]["tgp_af"] = float(l[40])
@@ -968,7 +977,7 @@ class VariantData:
 
     _insert_data()
 
-class GeneNetwork:
+class GeneNetwork(object):
   def __init__(self, var_data):
     self.vd = var_data
 
