@@ -31,10 +31,15 @@ class AnalyzeTrio(object):
   def __init__(self, variantdata, db_file):
     self.version = "analyzetrio-1.0"
     self.weights = {"mendel": 1,
-                    "nonsyn": 3,
-                    "qv": 2,
-                    "global_af": -6,
-                    "local_af": -6,
+                    "nonsyn": 1,
+                    "phastcons": 1,
+                    "siphy": 1,
+                    "phylop": 1,
+                    "polyphen_hdiv": 1,
+                    "polyphen_hvar": 1,
+                    "qv": 1,
+                    "global_af": 1,
+                    "local_af": 1,
                     "net_cent": 1,
                     "net_nn": 1}
     self.exome_size = 30 * 10 ** 6
@@ -168,8 +173,9 @@ class AnalyzeTrio(object):
         elif q[0] == "l": # check against literal
           ac_v = self.__dict__[q[1]]
 
-        if (md_v == None and str(ac_v) != -1) or \
-           str(md_v) != str(ac_v):
+        if str(md_v) == "-1" and ac_v == None:
+          pass
+        elif str(md_v) != str(ac_v):
           raise ValueError("Invalid DB metadata (%s, %s != %s)" % (k, md_v, ac_v))
     elif action == "update":
       for k, q in md.items():
@@ -183,6 +189,11 @@ class AnalyzeTrio(object):
 
         if update_literal == True and \
            q[0] in ("l", "u", "p"):
+          try:
+            self.__dict__[q[1]]
+          except KeyError:
+            continue
+
           if q[0] == "p":
             new_v = base64.b64encode(cPickle.dumps(self.__dict__[q[1]], protocol=cPickle.HIGHEST_PROTOCOL))
           else:
@@ -737,19 +748,19 @@ class AnalyzeTrio(object):
     #self.local_af = self.af_from_vcf(self.vcf_file)
 
     # how many recessive, dominant, and comphet models are there
-    mendel_counts = {}
-
-    mendel_counts["xlinked"] = self._c.execute(
-      "SELECT COUNT(*) FROM mendel WHERE model = 'xlinked'").fetchone()[0]
-    mendel_counts["recessive"] = self._c.execute(
-      "SELECT COUNT(*) FROM mendel WHERE model = 'recessive'").fetchone()[0]
-    mendel_counts["dominant"] = self._c.execute(
-      "SELECT COUNT(*) FROM mendel WHERE model = 'dominant'").fetchone()[0]
-    mendel_counts["comphet"] = self._c.execute(
-      "SELECT COUNT(*) FROM mendel WHERE model = 'comphet'").fetchone()[0]
+#    mendel_counts = {}
+#
+#    mendel_counts["xlinked"] = self._c.execute(
+#      "SELECT COUNT(*) FROM mendel WHERE model = 'xlinked'").fetchone()[0]
+#    mendel_counts["recessive"] = self._c.execute(
+#      "SELECT COUNT(*) FROM mendel WHERE model = 'recessive'").fetchone()[0]
+#    mendel_counts["dominant"] = self._c.execute(
+#      "SELECT COUNT(*) FROM mendel WHERE model = 'dominant'").fetchone()[0]
+#    mendel_counts["comphet"] = self._c.execute(
+#      "SELECT COUNT(*) FROM mendel WHERE model = 'comphet'").fetchone()[0]
 
     # for every gene
-    for g in self.vd.fetch_all_genes():
+    for g in [self.vd.fetch_gene(x) for x in ("SAMD9", "SAMD9L")]:#self.vd.fetch_all_genes():
       tx_scores = []
 
       # take the best-scoring tx for this gene
@@ -781,18 +792,24 @@ class AnalyzeTrio(object):
           for i in m_a:
             m_a[i].local_af = 1#self.local_af[m_v[i].chrom][m_v[i].pos][m_a[i].sequence]
 
-          ni_T = self.exome_size / tx_size
-          ni_lambda = mendel_counts[m["model"]] / ni_T
-          model_score["mendel"] = self.newell_ikeda(1, ni_lambda, ni_T, 1)
+#          ni_T = self.exome_size / tx_size
+#          ni_lambda = mendel_counts[m["model"]] / ni_T
+#          model_score["mendel"] = self.newell_ikeda(1, ni_lambda, ni_T, 1)
 
-          model_score["nonsyn"] = sum([1 for a in m_a.values() if a.muts]) / float(len(m_a))
-          model_score["phastcons"] = mult([v.phastcons if v.phastcons else 0 for v in m_v.values()])
-          model_score["local_af"] = mult([a.local_af for a in m_a.values()])
-          model_score["global_af"] = mult([a.evs_af if a.evs_af else 0 for a in m_a.values()])
           model_score["qv"] = sum([v.samples["%s_QV" % n] for v in m_vcf.values() \
             for n in self.stripped_pedigree.values()]) / (594.0 if m["model"] == "comphet" else 297.0)
+          model_score["phastcons"] = mult([v.phastcons if v.phastcons else 0 for v in m_v.values()])
+          model_score["siphy"] = mult([v.siphy if v.siphy else 0 for v in m_v.values()])
+          model_score["phylop"] = mult([v.phylop if v.phylop else 0 for v in m_v.values()])
 
-          if model_score["phastcons"] != 0: import pdb; pdb.set_trace()
+          model_score["polyphen_hdiv"] = sum([a.polyphen_hdiv for a in m_a.values() if a.polyphen_hdiv])
+          model_score["polyphen_hvar"] = sum([a.polyphen_hvar for a in m_a.values() if a.polyphen_hvar])
+          model_score["nonsyn"] = sum([1 for a in m_a.values() if a.muts]) / float(len(m_a))
+          model_score["local_af"] = mult([a.local_af for a in m_a.values()])
+          model_score["global_af"] = mult([a.evs_af if a.evs_af else 0 for a in m_a.values()])
+
+          #print m_a[0].__dict__, m_v[0].__dict__
+          #if model_score["phastcons"] != 0: import pdb; pdb.set_trace()
           model_scores.append((self.wsm(model_score), model_score))
 
         best_model_score = sorted(model_scores, key=lambda x: x[0])[-1]
@@ -810,7 +827,7 @@ class AnalyzeTrio(object):
 
       print g.name, gene_score, best_tx_score
 
-  def populate_mendel(self, pedigree):
+  def populate_mendel(self):
     s_time = time.time()
     processed = 0
     batch = []

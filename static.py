@@ -1,3 +1,4 @@
+from functools import partial
 import bz2file
 import math
 from multiprocessing import Pool
@@ -303,7 +304,7 @@ class VariantData(object):
     if gene_id:
       d = self._c.execute("SELECT * FROM genes WHERE gene_id = %s" % gene_id).fetchone()
     elif gene_name:
-      d = self._c.execute("SELECT * FROM genes WHERE gene_name = %s" % gene_name).fetchone()
+      d = self._c.execute("SELECT * FROM genes WHERE name = '%s" % gene_name).fetchone()
 
     if d == None:
       return None
@@ -1076,45 +1077,10 @@ class GeneNetwork(object):
     plt.axis("off")
     plt.show()
 
-  @staticmethod
-  def score_gene(gene, graph, top_genes):
-    if gene not in graph or \
-       graph.degree(gene) == 0:
-      harmonic_centrality = -1
-      nearest_neighbor = -1
-    else:
-      dist_to_top_genes = []
-
-      # shortest path by weight to each of top genes
-      for top_gene in top_genes:
-        if top_gene == gene:
-          continue
-
-        try:
-          path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
-        except (networkx.exception.NetworkXNoPath, KeyError):
-          continue
-
-        weights = []
-
-        for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
-          weights.append(graph[node_from][node_to]["weight"])
-
-        dist_to_top_genes.append(float(sum(weights)))
-
-      # harmonic centrality defines how well connected a gene is all puck genes
-      # nearest-neighobr defines how close a gene is to its nearest puck gene
-      harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
-      nearest_neighbor = sorted(dist_to_top_genes)[0]
-
-      print "gene:  %s\n  c:   %s\n  n:   %s" % (gene, harmonic_centrality, nearest_neighbor)
-
-    return (gene, harmonic_centrality, nearest_neighbor)
-
-  def score_all_genes(self, graph):
-    p = Pool(NUM_PROCS)
-    partial_score_gene = partial(self.score_gene, graph=graph, top_genes=self.top_genes)
-    result = p.map(partial_score_gene, self.gene_names())
+  def score_all_genes(self, graph, num_procs=1):
+    partial_score_gene = partial(score_gene, graph=graph, top_genes=self.top_genes)
+    p = Pool(num_procs)
+    result = p.map(partial_score_gene, list(self.vd.gene_names()))
     p.close()
 
     # convert them all to percentiles
@@ -1137,10 +1103,50 @@ class GeneNetwork(object):
         cent_perc = scipy.stats.percentileofscore(cent_hist, cent_score) / 100.0
         nn_perc = 1 - scipy.stats.percentileofscore(nn_hist, nn_score) / 100.0
 
-        print "gene:  %s\n  c:   %s\n  c_p: %s\n  n:   %s\n  n_p: %s\n" % \
+        print "gene:  %s\n  c:   %s\n  c_p: %s\n  n:   %s\n  n_p: %s" % \
           (gene, cent_score, cent_perc, nn_score, nn_perc)
 
       batch.append((cent_score, cent_perc, nn_score, nn_perc, gene))
 
     self.vd._c.executemany("UPDATE genes SET cent_score = ?, cent_perc = ?, " \
       "nn_score = ?, nn_perc = ? WHERE name = ?", batch)
+    self.vd._conn.commit()
+
+def score_gene(gene, graph, top_genes):
+  if gene not in graph or \
+     graph.degree(gene) == 0:
+    harmonic_centrality = -1
+    nearest_neighbor = -1
+  else:
+    dist_to_top_genes = []
+
+    # shortest path by weight to each of top genes
+    for top_gene in top_genes:
+      if top_gene == gene:
+        continue
+
+      try:
+        path = networkx.shortest_path(graph, gene, top_gene, weight="weight")
+      except (networkx.exception.NetworkXNoPath, KeyError):
+        continue
+
+      weights = []
+
+      for node_from, node_to in [path[i:i+2] for i in range(len(path)-1)]:
+        weights.append(graph[node_from][node_to]["weight"])
+
+      dist_to_top_genes.append(float(sum(weights)))
+
+    # edge case: gene is in connected component separate from ALL top genes
+    if len(dist_to_top_genes) == 0:
+      harmonic_centrality = -1
+      nearest_neighbor = -1
+    else:
+      # harmonic centrality defines how well connected a gene is all puck genes
+      # nearest-neighbor defines how close a gene is to its nearest puck gene
+      harmonic_centrality = sum([1 / x for x in dist_to_top_genes])
+      nearest_neighbor = sorted(dist_to_top_genes)[0]
+
+      print "gene:  %s\n  c:   %s\n  n:   %s" % (gene, harmonic_centrality, nearest_neighbor)
+
+  return (gene, harmonic_centrality, nearest_neighbor)
