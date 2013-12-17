@@ -193,7 +193,7 @@ class VariantData(object):
 
     if action == "check":
       for k, q in md.items():
-        md_v = self._c.execute("SELECT v FROM metadata WHERE k = '%s'" % k).fetchone()[0]
+        md_v = self._c.execute("SELECT v FROM metadata WHERE k = ?", k).fetchone()[0]
 
         if q[0] == "q":
           ac_v = self._c.execute(q[1]).fetchone()[0]
@@ -210,12 +210,12 @@ class VariantData(object):
           if ac_v == None:
             ac_v = -1
 
-          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (ac_v, k))
+          self._c.execute("UPDATE metadata SET v = ? WHERE k = ?", (ac_v, k))
 
         if update_literal == True and \
            q[0] == "l":
 
-          self._c.execute("UPDATE metadata SET v = '%s' WHERE k = '%s'" % (q[1], k))
+          self._c.execute("UPDATE metadata SET v = ? WHERE k = ?" % (q[1], k))
 
       self._conn.commit()
 
@@ -230,12 +230,12 @@ class VariantData(object):
     if v == None:
       raise ValueError("No variant matching variant_id=%s" % variant_id)
 
-    d = self._c.execute("SELECT tx_id FROM tx_to_variant WHERE variant_id = %s" %
+    d = self._c.execute("SELECT tx_id FROM tx_to_variant WHERE variant_id = ?",
       v.variant_id).fetchall()
 
     if d == None:
-      d = self._c.execute("SELECT tx_id FROM transcripts WHERE chrom = '%s' AND " \
-        "%s BETWEEN tx_start AND tx_end" % (v.chrom, v.pos)).fetchall()
+      d = self._c.execute("SELECT tx_id FROM transcripts WHERE chrom = ? AND " \
+        "? BETWEEN tx_start AND tx_end", (v.chrom, v.pos)).fetchall()
 
       if d != None:
         batch = [(x["tx_id"], variant_id) for x in d]
@@ -261,12 +261,12 @@ class VariantData(object):
     if t == None:
       raise ValueError("No transcript matching tx_id=%s" % tx_id)
 
-    d = self._c.execute("SELECT variant_id FROM tx_to_variant WHERE tx_id = %s" %
+    d = self._c.execute("SELECT variant_id FROM tx_to_variant WHERE tx_id = ?",
       t.tx_id).fetchall()
 
     if d == None:
-      d = self._c.execute("SELECT variant_id FROM variants WHERE chrom = %s AND " \
-        "pos BETWEEN %s AND %s" % (t.chrom, t.tx_start, t.tx_end)).fetchall()
+      d = self._c.execute("SELECT variant_id FROM variants WHERE chrom = ? AND " \
+        "pos BETWEEN ? AND ?", (t.chrom, t.tx_start, t.tx_end)).fetchall()
 
       if d != None:
         batch = [(t.tx_id, x["variant_id"]) for x in d]
@@ -302,9 +302,9 @@ class VariantData(object):
       raise ValueError("Must specify either gene_name or gene_id")
 
     if gene_id:
-      d = self._c.execute("SELECT * FROM genes WHERE gene_id = %s" % gene_id).fetchone()
+      d = self._c.execute("SELECT * FROM genes WHERE gene_id = ?", gene_id).fetchone()
     elif gene_name:
-      d = self._c.execute("SELECT * FROM genes WHERE name = '%s'" % gene_name).fetchone()
+      d = self._c.execute("SELECT * FROM genes WHERE name = ?", gene_name).fetchone()
 
     if d == None:
       return None
@@ -319,7 +319,7 @@ class VariantData(object):
 
     g.transcripts = {}
 
-    all_tx = self._c.execute("SELECT tx_id FROM gene_to_tx WHERE gene_id = '%s'" % g.gene_id).fetchall()
+    all_tx = self._c.execute("SELECT tx_id FROM gene_to_tx WHERE gene_id = ?", g.gene_id).fetchall()
 
     for tx_id in all_tx:
       t = self.fetch_tx(tx_id=tx_id["tx_id"])
@@ -343,9 +343,9 @@ class VariantData(object):
       raise ValueError("Must specify either tx_name or tx_id")
 
     if tx_id:
-      d = self._c.execute("SELECT * FROM transcripts WHERE tx_id = %s" % tx_id).fetchone()
+      d = self._c.execute("SELECT * FROM transcripts WHERE tx_id = ?", tx_id).fetchone()
     elif tx_name:
-      d = self._c.execute("SELECT * FROM transcripts WHERE tx_name = %s" % tx_name).fetchone()
+      d = self._c.execute("SELECT * FROM transcripts WHERE name = ?", tx_name).fetchone()
 
     if d == None:
       return None
@@ -364,7 +364,7 @@ class VariantData(object):
 
     t.proteins = {}
 
-    all_prot = self._c.execute("SELECT protein_id FROM protein_to_tx WHERE tx_id = %s" % t.tx_id).fetchall()
+    all_prot = self._c.execute("SELECT protein_id FROM protein_to_tx WHERE tx_id = ?", t.tx_id).fetchall()
 
     for prot_id in all_prot:
       p = self.fetch_protein(protein_id=prot_id["protein_id"])
@@ -388,9 +388,9 @@ class VariantData(object):
       raise ValueError("Must specify either protein_name or protein_id")
 
     if protein_id:
-      d = self._c.execute("SELECT * FROM proteins WHERE protein_id = %s" % protein_id).fetchone()
+      d = self._c.execute("SELECT * FROM proteins WHERE protein_id = ?", protein_id).fetchone()
     elif protein_name:
-      d = self._c.execute("SELECT * FROM proteins WHERE protein_name = %s" % protein_name).fetchone()
+      d = self._c.execute("SELECT * FROM proteins WHERE name = ?", protein_name).fetchone()
 
     if d == None:
       return None
@@ -408,9 +408,9 @@ class VariantData(object):
       raise ValueError("Must specify either chrom and pos or variant_id")
 
     if variant_id:
-      d = self._c.execute("SELECT * FROM variants WHERE variant_id = %s" % variant_id).fetchone()
+      d = self._c.execute("SELECT * FROM variants WHERE variant_id = ?", variant_id).fetchone()
     elif chrom and pos:
-      d = self._c.execute("SELECT * FROM variants WHERE chrom = '%s' AND pos = %s" % (chrom, pos)).fetchone()
+      d = self._c.execute("SELECT * FROM variants WHERE chrom = ? AND pos = ?", (chrom, pos)).fetchone()
 
     if d == None:
       return None
@@ -425,7 +425,7 @@ class VariantData(object):
 
     v.alleles = {}
 
-    all_alleles = self._c.execute("SELECT allele_id FROM alleles WHERE variant_id = '%s'" % v.variant_id).fetchall()
+    all_alleles = self._c.execute("SELECT allele_id FROM alleles WHERE variant_id = ?", v.variant_id).fetchall()
 
     for allele_id in all_alleles:
       a = self.fetch_allele(allele_id=allele_id["allele_id"])
@@ -445,7 +445,7 @@ class VariantData(object):
     if v != None:
       raise ValueError("Variant exists where chrom=%s, pos=%s" % (chrom, pos))
 
-    self._c.execute("INSERT INTO variants (chrom, pos) VALUES ('%s', %s)" % (chrom, pos))
+    self._c.execute("INSERT INTO variants (chrom, pos) VALUES (?, ?)", (chrom, pos))
     v = self.fetch_variant(variant_id=self._c.lastrowid)
     self.find_tx_overlapping_var(v.variant_id)
 
@@ -458,8 +458,8 @@ class VariantData(object):
       raise ValueError("Must specify chrom, start, and end")
 
 
-    d = self._c.execute("SELECT variant_id FROM variants WHERE chrom = '%s' " \
-      "AND pos BETWEEN %s AND %s" % (chrom, start, end)).fetchall()
+    d = self._c.execute("SELECT variant_id FROM variants WHERE chrom = ? " \
+      "AND pos BETWEEN ? AND ?", (chrom, start, end)).fetchall()
 
     variants = [self.fetch_variant(variant_id=x["variant_id"]) for x in d]
 
@@ -472,11 +472,11 @@ class VariantData(object):
       raise ValueError("Must specify either variant_id and seq or allele_id")
 
     if allele_id:
-      d = self._c.execute("SELECT * FROM alleles WHERE allele_id = %s" % 
+      d = self._c.execute("SELECT * FROM alleles WHERE allele_id = ?",
         allele_id).fetchone()
     elif variant_id and seq:
-      d = self._c.execute("SELECT * FROM alleles WHERE variant_id = %s AND " \
-        "sequence = '%s'" % (variant_id, seq)).fetchone()
+      d = self._c.execute("SELECT * FROM alleles WHERE variant_id = ? AND " \
+        "sequence = ?", (variant_id, seq)).fetchone()
 
     if d == None:
       return None
@@ -494,7 +494,7 @@ class VariantData(object):
 
     a.muts = {}
 
-    all_muts = self._c.execute("SELECT mut_id FROM muts WHERE allele_id = '%s'" % a.allele_id).fetchall()
+    all_muts = self._c.execute("SELECT mut_id FROM muts WHERE allele_id = ?", a.allele_id).fetchall()
 
     for mut_id in all_muts:
       m = self.fetch_mut(mut_id=mut_id["mut_id"])
@@ -514,7 +514,7 @@ class VariantData(object):
     if a != None:
       raise ValueError("Allele exists where variant_id=%s, seq=%s" % (variant_id, seq))
 
-    self._c.execute("INSERT INTO alleles (variant_id, sequence) VALUES (%s, '%s')" % (variant_id, seq))
+    self._c.execute("INSERT INTO alleles (variant_id, sequence) VALUES (?, ?)", (variant_id, seq))
 
     return self.fetch_allele(allele_id=self._c.lastrowid)
 
@@ -525,13 +525,12 @@ class VariantData(object):
       raise ValueError("Must specify either mut_id or tx_id")
 
     if mut_id:
-      d = self._c.execute("SELECT * FROM muts WHERE mut_id = %s" % 
-        mut_id).fetchone()
+      d = self._c.execute("SELECT * FROM muts WHERE mut_id = ?", mut_id).fetchone()
     elif tx_id and mut:
-      d = self._c.execute("SELECT * FROM muts WHERE tx_id = %s AND mut = '%s'" %
+      d = self._c.execute("SELECT * FROM muts WHERE tx_id = ? AND mut = ?",
         (tx_id, mut)).fetchone()
     elif tx_id:
-      d = self._c.execute("SELECT * FROM muts WHERE tx_id = %s" %
+      d = self._c.execute("SELECT * FROM muts WHERE tx_id = ?",
         tx_id).fetchone()
 
     if d == None:
@@ -551,7 +550,7 @@ class VariantData(object):
     if not (allele_id and tx_id and mut):
       raise ValueError("Must specify allele_id, tx_id, and mut")
 
-    self._c.execute("INSERT INTO muts (allele_id, tx_id, mut) VALUES (%s, %s, '%s')" %
+    self._c.execute("INSERT INTO muts (allele_id, tx_id, mut) VALUES (?, ?, ?)",
       (allele_id, tx_id, mut))
     m = self.fetch_mut(mut_id=self._c.lastrowid)
 
@@ -569,10 +568,10 @@ class VariantData(object):
     assert self._conn, self._c
 
     genes = self._c.execute("SELECT genes.name AS g FROM genes, proteins, " \
-      "protein_to_tx, gene_to_tx WHERE proteins.name = '%s' AND " \
+      "protein_to_tx, gene_to_tx WHERE proteins.name = ? AND " \
       "proteins.protein_id = protein_to_tx.protein_id AND " \
       "protein_to_tx.tx_id = gene_to_tx.tx_id AND " \
-      "genes.gene_id = gene_to_tx.gene_id GROUP BY g").fetchall()
+      "genes.gene_id = gene_to_tx.gene_id GROUP BY g", protein_name).fetchall()
     genes = [x["g"] for x in genes]
 
     return genes
@@ -640,8 +639,8 @@ class VariantData(object):
     self._conn.commit()
 
     for gene, tx in gene_to_tx:
-      gene_id = self._c.execute("SELECT gene_id FROM genes WHERE name = '%s'" % gene).fetchone()
-      tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = '%s'" % tx).fetchone()
+      gene_id = self._c.execute("SELECT gene_id FROM genes WHERE name = ?", gene).fetchone()
+      tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = ?", tx).fetchone()
 
       if gene_id == None or \
          tx_id == None:
@@ -650,7 +649,7 @@ class VariantData(object):
       gene_id = gene_id[0]
       tx_id = tx_id[0]
 
-      self._c.execute("INSERT INTO gene_to_tx (gene_id, tx_id) VALUES (%s, %s)" % (gene_id, tx_id))
+      self._c.execute("INSERT INTO gene_to_tx (gene_id, tx_id) VALUES (?, ?)", (gene_id, tx_id))
 
     self._conn.commit()
 
@@ -671,8 +670,8 @@ class VariantData(object):
     self._conn.commit()
 
     for protein, tx in protein_to_tx:
-      protein_id = self._c.execute("SELECT protein_id FROM proteins WHERE name = '%s'" % protein).fetchone()
-      tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = '%s'" % tx).fetchone()
+      protein_id = self._c.execute("SELECT protein_id FROM proteins WHERE name = ?", protein).fetchone()
+      tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = ?", tx).fetchone()
 
       if protein_id == None or \
          tx_id == None:
@@ -681,7 +680,7 @@ class VariantData(object):
       protein_id = protein_id[0]
       tx_id = tx_id[0]
 
-      self._c.execute("INSERT INTO protein_to_tx (protein_id, tx_id) VALUES (%s, %s)" % (protein_id, tx_id))
+      self._c.execute("INSERT INTO protein_to_tx (protein_id, tx_id) VALUES (?, ?)", (protein_id, tx_id))
 
     self._conn.commit()
 
@@ -723,7 +722,7 @@ class VariantData(object):
       try:
         evs[chrom][pos]["phastcons"] = float(l[18])
       except ValueError:
-        evs[chrom][pos]["phastcons"] = -1
+        evs[chrom][pos]["phastcons"] = None
 
       try:
         evs[chrom][pos]["alleles"]
@@ -756,32 +755,32 @@ class VariantData(object):
     for chrom in sorted(evs.keys()):
       for pos in sorted(evs[chrom].keys()):
         variant_id = self._c.execute("SELECT variant_id FROM variants WHERE " \
-          "chrom = '%s' AND pos = '%s'" % (chrom, pos)).fetchone()
+          "chrom = ? AND pos = ?", (chrom, pos)).fetchone()
 
         if variant_id == None:
           self._c.execute("INSERT INTO variants (chrom, pos, phastcons) VALUES " \
-            "('%s', %s, %s)" % (chrom, pos, evs[chrom][pos]["phastcons"]))
+            "(?, ?, ?)", (chrom, pos, evs[chrom][pos]["phastcons"]))
 
           variant_id = self._c.lastrowid
         else:
           variant_id = variant_id[0]
 
-          self._c_.execute("UPDATE variants SET phastcons = '%s' WHERE " \
-            "variant_id = '%s'" % (evs[chrom][pos]["phastcons"], variant_id))
+          self._c_.execute("UPDATE variants SET phastcons = ? WHERE " \
+            "variant_id = ?", (evs[chrom][pos]["phastcons"], variant_id))
 
         for allele in evs[chrom][pos]["alleles"]:
           allele_id = self._c.execute("SELECT allele_id FROM alleles WHERE " \
-            "variant_id = %s AND sequence = '%s'" % (variant_id, allele)).fetchone()
+            "variant_id = ? AND sequence = ?", (variant_id, allele)).fetchone()
 
           if allele_id == None:
             self._c.execute("INSERT INTO alleles (variant_id, sequence, evs_af) " \
-              "VALUES (%s, '%s', %s)" % (variant_id, allele, evs[chrom][pos]["alleles"][allele]))
+              "VALUES (?, ?, ?)", (variant_id, allele, evs[chrom][pos]["alleles"][allele]))
 
             allele_id = self._c.lastrowid
           else:
             allele_id = allele_id[0]
 
-            self._c.execute("UPDATE alleles SET evs_af = %s WHERE allele_id = %s" %
+            self._c.execute("UPDATE alleles SET evs_af = ? WHERE allele_id = ?",
               (allele_id, evs[chrom][pos]["alleles"][allele]))
 
         processed += 1
@@ -805,47 +804,46 @@ class VariantData(object):
         d = dbnsfp[pos]
 
         variant_id = self._c.execute("SELECT variant_id FROM variants WHERE " \
-          "chrom = '%s' AND pos = '%s'" % (chrom_history[-1], pos)).fetchone()
+          "chrom = ? AND pos = ?", (chrom_history[-1], pos)).fetchone()
 
         if variant_id == None:
           self._c.execute("INSERT INTO variants (chrom, pos, phylop, siphy) VALUES " \
-            "('%s', %s, %s, %s)" % (chrom_history[-1], pos, d["phylop"], d["siphy"]))
+            "(?, ?, ?, ?)", (chrom_history[-1], pos, d["phylop"], d["siphy"]))
 
           variant_id = self._c.lastrowid
         else:
           variant_id = variant_id[0]
 
-          self._c.execute("UPDATE variants SET phylop = '%s', siphy = '%s' WHERE " \
-            "variant_id = '%s'" % (d["phylop"], d["siphy"], variant_id))
+          self._c.execute("UPDATE variants SET phylop = ?, siphy = ? WHERE " \
+            "variant_id = ?", (d["phylop"], d["siphy"], variant_id))
 
         for allele in d["alleles"]:
           d_a = d["alleles"][allele]
 
           allele_id = self._c.execute("SELECT allele_id FROM alleles WHERE " \
-            "variant_id = %s AND sequence = '%s'" % (variant_id, allele)).fetchone()
+            "variant_id = ? AND sequence = ?", (variant_id, allele)).fetchone()
 
           if allele_id == None:
             self._c.execute("INSERT INTO alleles (variant_id, sequence, tgp_af, " \
               "polyphen_hdiv, polyphen_hvar, mut_taster, mut_assessor) VALUES " \
-              "(%s, '%s', %s, %s, %s, %s, %s)" % (variant_id, allele,
-              d_a["tgp_af"], d_a["pp_hdiv"], d_a["pp_hvar"],
-              d_a["mut_taster"], d_a["mut_assessor"]))
+              "(?, ?, ?, ?, ?, ?, ?)", (variant_id, allele, d_a["tgp_af"],
+              d_a["pp_hdiv"], d_a["pp_hvar"], d_a["mut_taster"], d_a["mut_assessor"]))
 
             allele_id = self._c.lastrowid
           else:
             allele_id = allele_id[0]
 
-            self._c.execute("UPDATE alleles SET tgp_af = '%s', polyphen_hdiv = '%s', " \
-              "polyphen_hvar = '%s', mut_taster = '%s', mut_assessor = '%s' " \
-              "WHERE allele_id = %s" % (d_a["tgp_af"], d_a["pp_hdiv"],
-              d_a["pp_hvar"], d_a["mut_taster"], d_a["mut_assessor"], allele_id))
+            self._c.execute("UPDATE alleles SET tgp_af = ?, polyphen_hdiv = ?, " \
+              "polyphen_hvar = ?, mut_taster = ?, mut_assessor = ? " \
+              "WHERE allele_id = ?", (d_a["tgp_af"], max(d_a["pp_hdiv"]), max(d_a["pp_hvar"]),
+              d_a["mut_taster"], d_a["mut_assessor"], allele_id))
 
           if d_a["aaref"] != d_a["aaalt"] and \
              d_a["aaref"] != "." and \
              d_a["aaalt"] != "." and \
              d_a["aapos"] != "-1":
             for tx, mutpos in zip(d_a["tx"], d_a["aapos"]):
-              tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = '%s'" % tx).fetchone()
+              tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = ?", tx).fetchone()
   
               if tx_id == None:
                 continue
@@ -855,7 +853,7 @@ class VariantData(object):
               mut = "".join([d_a["aaref"], mutpos, d_a["aaalt"]])
   
               self._c.execute("INSERT INTO muts (allele_id, tx_id, mut) VALUES " \
-              "(%s, %s, '%s')" % (allele_id, tx_id, mut))
+              "(?, ?, ?)", (allele_id, tx_id, mut))
 
         processed += 1
         if processed % 100 == 0:
@@ -926,12 +924,12 @@ class VariantData(object):
       try:
         dbnsfp[pos]["phylop"] = float(l[34])
       except ValueError:
-        dbnsfp[pos]["phylop"] = -1
+        dbnsfp[pos]["phylop"] = None
 
       try:
         dbnsfp[pos]["siphy"] = float(l[36])
       except ValueError:
-        dbnsfp[pos]["siphy"] = -1
+        dbnsfp[pos]["siphy"] = None
 
       try:
         dbnsfp[pos]["alleles"]
@@ -949,27 +947,27 @@ class VariantData(object):
         try:
           dbnsfp[pos]["alleles"][l[3]]["tgp_af"] = float(l[40])
         except ValueError:
-          dbnsfp[pos]["alleles"][l[3]]["tgp_af"] = -1
+          dbnsfp[pos]["alleles"][l[3]]["tgp_af"] = None
 
         try:
-          dbnsfp[pos]["alleles"][l[3]]["pp_hdiv"] = float(l[22])
+          dbnsfp[pos]["alleles"][l[3]]["pp_hdiv"] = float(l[22]).split(";")
         except ValueError:
-          dbnsfp[pos]["alleles"][l[3]]["pp_hdiv"] = -1
+          dbnsfp[pos]["alleles"][l[3]]["pp_hdiv"] = None
 
         try:
-          dbnsfp[pos]["alleles"][l[3]]["pp_hvar"] = float(l[24])
+          dbnsfp[pos]["alleles"][l[3]]["pp_hvar"] = float(l[24]).split(";")
         except ValueError:
-          dbnsfp[pos]["alleles"][l[3]]["pp_hvar"] = -1
+          dbnsfp[pos]["alleles"][l[3]]["pp_hvar"] = None
 
         try:
           dbnsfp[pos]["alleles"][l[3]]["mut_taster"] = float(l[28])
         except ValueError:
-          dbnsfp[pos]["alleles"][l[3]]["mut_taster"] = -1
+          dbnsfp[pos]["alleles"][l[3]]["mut_taster"] = None
 
         try:
           dbnsfp[pos]["alleles"][l[3]]["mut_assessor"] = float(l[30])
         except ValueError:
-          dbnsfp[pos]["alleles"][l[3]]["mut_assessor"] = -1
+          dbnsfp[pos]["alleles"][l[3]]["mut_assessor"] = None
 
       processed += 1
       if processed % 100 == 0:
