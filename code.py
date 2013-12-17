@@ -745,7 +745,7 @@ class AnalyzeTrio(object):
     mult = lambda x: reduce(lambda x, y: x*y, x)
 
     # load local allele frequencies
-    #self.local_af = self.af_from_vcf(self.vcf_file)
+    self.local_af = self.af_from_vcf(self.vcf_file)
 
     # how many recessive, dominant, and comphet models are there
 #    mendel_counts = {}
@@ -760,7 +760,7 @@ class AnalyzeTrio(object):
 #      "SELECT COUNT(*) FROM mendel WHERE model = 'comphet'").fetchone()[0]
 
     # for every gene
-    for g in [self.vd.fetch_gene(x) for x in ("SAMD9", "SAMD9L")]:#self.vd.fetch_all_genes():
+    for g in self.vd.fetch_all_genes():
       tx_scores = []
 
       # take the best-scoring tx for this gene
@@ -790,7 +790,7 @@ class AnalyzeTrio(object):
 
           # local af
           for i in m_a:
-            m_a[i].local_af = 1#self.local_af[m_v[i].chrom][m_v[i].pos][m_a[i].sequence]
+            m_a[i].local_af = self.local_af[m_v[i].chrom][m_v[i].pos][m_a[i].sequence]
 
 #          ni_T = self.exome_size / tx_size
 #          ni_lambda = mendel_counts[m["model"]] / ni_T
@@ -798,12 +798,12 @@ class AnalyzeTrio(object):
 
           model_score["qv"] = sum([v.samples["%s_QV" % n] for v in m_vcf.values() \
             for n in self.stripped_pedigree.values()]) / (594.0 if m["model"] == "comphet" else 297.0)
-          model_score["phastcons"] = mult([v.phastcons if v.phastcons else 0 for v in m_v.values()])
-          model_score["siphy"] = mult([v.siphy if v.siphy else 0 for v in m_v.values()])
-          model_score["phylop"] = mult([v.phylop if v.phylop else 0 for v in m_v.values()])
+          model_score["phastcons"] = mult([v.phastcons if v.phastcons and v.phastcons != -1 else 0 for v in m_v.values()])
+          model_score["siphy"] = mult([v.siphy if v.siphy and v.siphy != -1 else 0 for v in m_v.values()])
+          model_score["phylop"] = mult([v.phylop if v.phylop and v.phylop != -1 else 0 for v in m_v.values()])
 
-          model_score["polyphen_hdiv"] = sum([a.polyphen_hdiv for a in m_a.values() if a.polyphen_hdiv])
-          model_score["polyphen_hvar"] = sum([a.polyphen_hvar for a in m_a.values() if a.polyphen_hvar])
+          model_score["polyphen_hdiv"] = sum([a.polyphen_hdiv for a in m_a.values() if a.polyphen_hdiv and a.polyphen_hdiv != -1])
+          model_score["polyphen_hvar"] = sum([a.polyphen_hvar for a in m_a.values() if a.polyphen_hvar and a.polyphen_hvar != -1])
           model_score["nonsyn"] = sum([1 for a in m_a.values() if a.muts]) / float(len(m_a))
           model_score["local_af"] = mult([a.local_af for a in m_a.values()])
           model_score["global_af"] = mult([a.evs_af if a.evs_af else 0 for a in m_a.values()])
@@ -820,8 +820,8 @@ class AnalyzeTrio(object):
       else:
         best_tx_score = sorted(tx_scores, key=lambda x: x[0])[-1][1]
 
-      best_tx_score["net_cent"] = 1#g.cent_perc
-      best_tx_score["net_nn"] = 1#g.nn_perc
+      best_tx_score["net_cent"] = g.cent_perc
+      best_tx_score["net_nn"] = g.nn_perc
 
       gene_score = self.wsm(best_tx_score)
 

@@ -304,7 +304,7 @@ class VariantData(object):
     if gene_id:
       d = self._c.execute("SELECT * FROM genes WHERE gene_id = %s" % gene_id).fetchone()
     elif gene_name:
-      d = self._c.execute("SELECT * FROM genes WHERE name = '%s" % gene_name).fetchone()
+      d = self._c.execute("SELECT * FROM genes WHERE name = '%s'" % gene_name).fetchone()
 
     if d == None:
       return None
@@ -702,7 +702,7 @@ class VariantData(object):
       if l.startswith("#"):
         continue
 
-      l = l.strip().split()
+      l = l.strip().split("\t")
 
       chrom, pos = l[0].split(":")
       chrom = "chr%s" % chrom
@@ -883,7 +883,7 @@ class VariantData(object):
       if l.startswith("#"):
         continue
 
-      l = l.strip().split()
+      l = l.strip().split("\t")
 
       #NOTE: convert 1-based to 0-based position
       pos = int(l[1]) - 1
