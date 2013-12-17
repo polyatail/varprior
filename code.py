@@ -94,6 +94,8 @@ class AnalyzeTrio(object):
     self._conn.row_factory = sqlite3.Row
     self._c = self._conn.cursor()
 
+    self._c.execute("PRAGMA synchronous = OFF")
+
   def db_init(self):
     assert self._conn, self._c
 
@@ -293,7 +295,8 @@ class AnalyzeTrio(object):
       l = l.strip().split()
 
       chrom = "chr%s" % l[0]
-      pos = int(l[1])
+      #NOTE: convert from 1-based VCF to 0-based
+      pos = int(l[1]) - 1
       ref = l[3]
       alt = [(str(x + 1), y) for x, y in enumerate(l[4].split(","))]
       code = dict([(str(0), ref)] + alt)

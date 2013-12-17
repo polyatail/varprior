@@ -76,6 +76,8 @@ class VariantData(object):
     self._conn.row_factory = sqlite3.Row
     self._c = self._conn.cursor()
 
+    self._c.execute("PRAGMA synchronous = OFF")
+
   def db_init(self):
     assert self._conn, self._c
 
@@ -807,40 +809,37 @@ class VariantData(object):
       for pos in sorted(dbnsfp.keys()):
         d = dbnsfp[pos]
 
-        variant_id = self._c.execute("SELECT variant_id FROM variants WHERE " \
-          "chrom = ? AND pos = ?", (chrom_history[-1], pos)).fetchone()
+        self._c.execute("UPDATE variants SET phylop = ?, siphy = ? WHERE " \
+          "chrom = ? AND pos = ?", (d["phylop"], d["siphy"], chrom_history[-1], pos))
 
-        if variant_id == None:
+        if self._c.rowcount == 0:
           self._c.execute("INSERT INTO variants (chrom, pos, phylop, siphy) VALUES " \
             "(?, ?, ?, ?)", (chrom_history[-1], pos, d["phylop"], d["siphy"]))
-
           variant_id = self._c.lastrowid
         else:
+          variant_id = self._c.execute("SELECT variant_id FROM variants WHERE " \
+            "chrom = ? AND pos = ?", (chrom_history[-1], pos)).fetchone()
           variant_id = variant_id[0]
-
-          self._c.execute("UPDATE variants SET phylop = ?, siphy = ? WHERE " \
-            "variant_id = ?", (d["phylop"], d["siphy"], variant_id))
 
         for allele in d["alleles"]:
           d_a = d["alleles"][allele]
 
-          allele_id = self._c.execute("SELECT allele_id FROM alleles WHERE " \
-            "variant_id = ? AND sequence = ?", (variant_id, allele)).fetchone()
+          self._c.execute("UPDATE alleles SET tgp_af = ?, polyphen_hdiv = ?, " \
+            "polyphen_hvar = ?, mut_taster = ?, mut_assessor = ? " \
+            "WHERE variant_id = ? AND sequence = ?", (d_a["tgp_af"],
+            d_a["pp_hdiv"], d_a["pp_hvar"], d_a["mut_taster"], d_a["mut_assessor"],
+            variant_id, allele))
 
-          if allele_id == None:
+          if self._c.rowcount == 0:
             self._c.execute("INSERT INTO alleles (variant_id, sequence, tgp_af, " \
               "polyphen_hdiv, polyphen_hvar, mut_taster, mut_assessor) VALUES " \
               "(?, ?, ?, ?, ?, ?, ?)", (variant_id, allele, d_a["tgp_af"],
               d_a["pp_hdiv"], d_a["pp_hvar"], d_a["mut_taster"], d_a["mut_assessor"]))
-
             allele_id = self._c.lastrowid
           else:
+            allele_id = self._c.execute("SELECT allele_id FROM alleles WHERE " \
+              "variant_id = ? AND sequence = ?", (variant_id, allele)).fetchone()
             allele_id = allele_id[0]
-
-            self._c.execute("UPDATE alleles SET tgp_af = ?, polyphen_hdiv = ?, " \
-              "polyphen_hvar = ?, mut_taster = ?, mut_assessor = ? " \
-              "WHERE allele_id = ?", (d_a["tgp_af"], d_a["pp_hdiv"], d_a["pp_hvar"],
-              d_a["mut_taster"], d_a["mut_assessor"], allele_id))
 
           if d_a["aaref"] != d_a["aaalt"] and \
              d_a["aaref"] != "." and \
