@@ -38,10 +38,10 @@ class AnalyzeTrio(object):
                     "polyphen_hdiv": 1,
                     "polyphen_hvar": 1,
                     "qv": 1,
-                    "global_af": 1,
-                    "local_af": 1,
-                    "net_cent": 1,
-                    "net_nn": 1}
+                    "global_af": -10,
+                    "local_af": -10,
+                    "net_cent": 10,
+                    "net_nn": 10}
     self.exome_size = 30 * 10 ** 6
 
     self.vd = variantdata
@@ -686,8 +686,11 @@ class AnalyzeTrio(object):
   @staticmethod
   def newell_ikeda(k, pois_lambda, T, w):
     # newell-ikeda poisson distributed scan statistic
-    return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / \
-                         scipy.misc.factorial(k - 1, exact=True))
+    try:
+      return 1 - numpy.exp(-pois_lambda ** k * w ** (k - 1) * T / \
+                           scipy.misc.factorial(k - 1, exact=True))
+    except AttributeError:
+      return 0
 
   def wpm(self, score_dict):
     # from http://en.wikipedia.org/wiki/Weighted_product_model
@@ -748,16 +751,16 @@ class AnalyzeTrio(object):
     self.local_af = self.af_from_vcf(self.vcf_file)
 
     # how many recessive, dominant, and comphet models are there
-#    mendel_counts = {}
-#
-#    mendel_counts["xlinked"] = self._c.execute(
-#      "SELECT COUNT(*) FROM mendel WHERE model = 'xlinked'").fetchone()[0]
-#    mendel_counts["recessive"] = self._c.execute(
-#      "SELECT COUNT(*) FROM mendel WHERE model = 'recessive'").fetchone()[0]
-#    mendel_counts["dominant"] = self._c.execute(
-#      "SELECT COUNT(*) FROM mendel WHERE model = 'dominant'").fetchone()[0]
-#    mendel_counts["comphet"] = self._c.execute(
-#      "SELECT COUNT(*) FROM mendel WHERE model = 'comphet'").fetchone()[0]
+    mendel_counts = {}
+
+    mendel_counts["xlinked"] = self._c.execute(
+      "SELECT COUNT(*) FROM mendel WHERE model = 'xlinked'").fetchone()[0]
+    mendel_counts["recessive"] = self._c.execute(
+      "SELECT COUNT(*) FROM mendel WHERE model = 'recessive'").fetchone()[0]
+    mendel_counts["dominant"] = self._c.execute(
+      "SELECT COUNT(*) FROM mendel WHERE model = 'dominant'").fetchone()[0]
+    mendel_counts["comphet"] = self._c.execute(
+      "SELECT COUNT(*) FROM mendel WHERE model = 'comphet'").fetchone()[0]
 
     # for every gene
     for g in self.vd.fetch_all_genes():
@@ -792,24 +795,24 @@ class AnalyzeTrio(object):
           for i in m_a:
             m_a[i].local_af = self.local_af[m_v[i].chrom][m_v[i].pos][m_a[i].sequence]
 
-#          ni_T = self.exome_size / tx_size
-#          ni_lambda = mendel_counts[m["model"]] / ni_T
-#          model_score["mendel"] = self.newell_ikeda(1, ni_lambda, ni_T, 1)
+          #ni_T = self.exome_size / tx_size
+          #ni_lambda = mendel_counts[m["model"]] / ni_T
+          #model_score["mendel"] = self.newell_ikeda(len(models), ni_lambda, ni_T, 1)
 
           model_score["qv"] = sum([v.samples["%s_QV" % n] for v in m_vcf.values() \
             for n in self.stripped_pedigree.values()]) / (594.0 if m["model"] == "comphet" else 297.0)
-          model_score["phastcons"] = mult([v.phastcons if v.phastcons and v.phastcons != -1 else 0 for v in m_v.values()])
-          model_score["siphy"] = mult([v.siphy if v.siphy and v.siphy != -1 else 0 for v in m_v.values()])
-          model_score["phylop"] = mult([v.phylop if v.phylop and v.phylop != -1 else 0 for v in m_v.values()])
+          model_score["phastcons"] = mult([v.phastcons if v.phastcons else 0 for v in m_v.values()])
+          #model_score["siphy"] = mult([v.siphy if v.siphy else 0 for v in m_v.values()])
+          #model_score["phylop"] = mult([v.phylop if v.phylop else 0 for v in m_v.values()])
 
-          model_score["polyphen_hdiv"] = sum([a.polyphen_hdiv for a in m_a.values() if a.polyphen_hdiv and a.polyphen_hdiv != -1])
-          model_score["polyphen_hvar"] = sum([a.polyphen_hvar for a in m_a.values() if a.polyphen_hvar and a.polyphen_hvar != -1])
+          model_score["polyphen_hdiv"] = sum([a.polyphen_hdiv for a in m_a.values() if a.polyphen_hdiv]) / float(len(m_a))
+          model_score["polyphen_hvar"] = sum([a.polyphen_hvar for a in m_a.values() if a.polyphen_hvar]) / float(len(m_a))
           model_score["nonsyn"] = sum([1 for a in m_a.values() if a.muts]) / float(len(m_a))
           model_score["local_af"] = mult([a.local_af for a in m_a.values()])
           model_score["global_af"] = mult([a.evs_af if a.evs_af else 0 for a in m_a.values()])
 
-          #print m_a[0].__dict__, m_v[0].__dict__
-          #if model_score["phastcons"] != 0: import pdb; pdb.set_trace()
+          model_score["_model"] = m
+
           model_scores.append((self.wsm(model_score), model_score))
 
         best_model_score = sorted(model_scores, key=lambda x: x[0])[-1]

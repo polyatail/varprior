@@ -193,7 +193,7 @@ class VariantData(object):
 
     if action == "check":
       for k, q in md.items():
-        md_v = self._c.execute("SELECT v FROM metadata WHERE k = ?", k).fetchone()[0]
+        md_v = self._c.execute("SELECT v FROM metadata WHERE k = ?", (k,)).fetchone()[0]
 
         if q[0] == "q":
           ac_v = self._c.execute(q[1]).fetchone()[0]
@@ -215,7 +215,7 @@ class VariantData(object):
         if update_literal == True and \
            q[0] == "l":
 
-          self._c.execute("UPDATE metadata SET v = ? WHERE k = ?" % (q[1], k))
+          self._c.execute("UPDATE metadata SET v = ? WHERE k = ?", (q[1], k))
 
       self._conn.commit()
 
@@ -231,7 +231,7 @@ class VariantData(object):
       raise ValueError("No variant matching variant_id=%s" % variant_id)
 
     d = self._c.execute("SELECT tx_id FROM tx_to_variant WHERE variant_id = ?",
-      v.variant_id).fetchall()
+      (v.variant_id,)).fetchall()
 
     if d == None:
       d = self._c.execute("SELECT tx_id FROM transcripts WHERE chrom = ? AND " \
@@ -262,7 +262,7 @@ class VariantData(object):
       raise ValueError("No transcript matching tx_id=%s" % tx_id)
 
     d = self._c.execute("SELECT variant_id FROM tx_to_variant WHERE tx_id = ?",
-      t.tx_id).fetchall()
+      (t.tx_id,)).fetchall()
 
     if d == None:
       d = self._c.execute("SELECT variant_id FROM variants WHERE chrom = ? AND " \
@@ -292,8 +292,12 @@ class VariantData(object):
 
       processed += 1
       if processed % 100 == 0:
+        self._conn.commit()
         sys.stderr.write("\rprocessed %s @ %.02f/s" %
           (processed, processed / (time.time() - s_time)))
+
+    self._conn.commit()
+    sys.stderr.write("\n")
 
   def fetch_gene(self, gene_name = None, gene_id = None):
     assert self._conn, self._c
@@ -302,9 +306,9 @@ class VariantData(object):
       raise ValueError("Must specify either gene_name or gene_id")
 
     if gene_id:
-      d = self._c.execute("SELECT * FROM genes WHERE gene_id = ?", gene_id).fetchone()
+      d = self._c.execute("SELECT * FROM genes WHERE gene_id = ?", (gene_id,)).fetchone()
     elif gene_name:
-      d = self._c.execute("SELECT * FROM genes WHERE name = ?", gene_name).fetchone()
+      d = self._c.execute("SELECT * FROM genes WHERE name = ?", (gene_name,)).fetchone()
 
     if d == None:
       return None
@@ -319,7 +323,7 @@ class VariantData(object):
 
     g.transcripts = {}
 
-    all_tx = self._c.execute("SELECT tx_id FROM gene_to_tx WHERE gene_id = ?", g.gene_id).fetchall()
+    all_tx = self._c.execute("SELECT tx_id FROM gene_to_tx WHERE gene_id = ?", (g.gene_id,)).fetchall()
 
     for tx_id in all_tx:
       t = self.fetch_tx(tx_id=tx_id["tx_id"])
@@ -343,9 +347,9 @@ class VariantData(object):
       raise ValueError("Must specify either tx_name or tx_id")
 
     if tx_id:
-      d = self._c.execute("SELECT * FROM transcripts WHERE tx_id = ?", tx_id).fetchone()
+      d = self._c.execute("SELECT * FROM transcripts WHERE tx_id = ?", (tx_id,)).fetchone()
     elif tx_name:
-      d = self._c.execute("SELECT * FROM transcripts WHERE name = ?", tx_name).fetchone()
+      d = self._c.execute("SELECT * FROM transcripts WHERE name = ?", (tx_name,)).fetchone()
 
     if d == None:
       return None
@@ -364,7 +368,7 @@ class VariantData(object):
 
     t.proteins = {}
 
-    all_prot = self._c.execute("SELECT protein_id FROM protein_to_tx WHERE tx_id = ?", t.tx_id).fetchall()
+    all_prot = self._c.execute("SELECT protein_id FROM protein_to_tx WHERE tx_id = ?", (t.tx_id,)).fetchall()
 
     for prot_id in all_prot:
       p = self.fetch_protein(protein_id=prot_id["protein_id"])
@@ -388,9 +392,9 @@ class VariantData(object):
       raise ValueError("Must specify either protein_name or protein_id")
 
     if protein_id:
-      d = self._c.execute("SELECT * FROM proteins WHERE protein_id = ?", protein_id).fetchone()
+      d = self._c.execute("SELECT * FROM proteins WHERE protein_id = ?", (protein_id,)).fetchone()
     elif protein_name:
-      d = self._c.execute("SELECT * FROM proteins WHERE name = ?", protein_name).fetchone()
+      d = self._c.execute("SELECT * FROM proteins WHERE name = ?", (protein_name,)).fetchone()
 
     if d == None:
       return None
@@ -408,7 +412,7 @@ class VariantData(object):
       raise ValueError("Must specify either chrom and pos or variant_id")
 
     if variant_id:
-      d = self._c.execute("SELECT * FROM variants WHERE variant_id = ?", variant_id).fetchone()
+      d = self._c.execute("SELECT * FROM variants WHERE variant_id = ?", (variant_id,)).fetchone()
     elif chrom and pos:
       d = self._c.execute("SELECT * FROM variants WHERE chrom = ? AND pos = ?", (chrom, pos)).fetchone()
 
@@ -425,7 +429,7 @@ class VariantData(object):
 
     v.alleles = {}
 
-    all_alleles = self._c.execute("SELECT allele_id FROM alleles WHERE variant_id = ?", v.variant_id).fetchall()
+    all_alleles = self._c.execute("SELECT allele_id FROM alleles WHERE variant_id = ?", (v.variant_id,)).fetchall()
 
     for allele_id in all_alleles:
       a = self.fetch_allele(allele_id=allele_id["allele_id"])
@@ -473,7 +477,7 @@ class VariantData(object):
 
     if allele_id:
       d = self._c.execute("SELECT * FROM alleles WHERE allele_id = ?",
-        allele_id).fetchone()
+        (allele_id,)).fetchone()
     elif variant_id and seq:
       d = self._c.execute("SELECT * FROM alleles WHERE variant_id = ? AND " \
         "sequence = ?", (variant_id, seq)).fetchone()
@@ -494,7 +498,7 @@ class VariantData(object):
 
     a.muts = {}
 
-    all_muts = self._c.execute("SELECT mut_id FROM muts WHERE allele_id = ?", a.allele_id).fetchall()
+    all_muts = self._c.execute("SELECT mut_id FROM muts WHERE allele_id = ?", (a.allele_id,)).fetchall()
 
     for mut_id in all_muts:
       m = self.fetch_mut(mut_id=mut_id["mut_id"])
@@ -525,13 +529,13 @@ class VariantData(object):
       raise ValueError("Must specify either mut_id or tx_id")
 
     if mut_id:
-      d = self._c.execute("SELECT * FROM muts WHERE mut_id = ?", mut_id).fetchone()
+      d = self._c.execute("SELECT * FROM muts WHERE mut_id = ?", (mut_id,)).fetchone()
     elif tx_id and mut:
       d = self._c.execute("SELECT * FROM muts WHERE tx_id = ? AND mut = ?",
         (tx_id, mut)).fetchone()
     elif tx_id:
       d = self._c.execute("SELECT * FROM muts WHERE tx_id = ?",
-        tx_id).fetchone()
+        (tx_id,)).fetchone()
 
     if d == None:
       return None
@@ -571,7 +575,7 @@ class VariantData(object):
       "protein_to_tx, gene_to_tx WHERE proteins.name = ? AND " \
       "proteins.protein_id = protein_to_tx.protein_id AND " \
       "protein_to_tx.tx_id = gene_to_tx.tx_id AND " \
-      "genes.gene_id = gene_to_tx.gene_id GROUP BY g", protein_name).fetchall()
+      "genes.gene_id = gene_to_tx.gene_id GROUP BY g", (protein_name,)).fetchall()
     genes = [x["g"] for x in genes]
 
     return genes
@@ -639,8 +643,8 @@ class VariantData(object):
     self._conn.commit()
 
     for gene, tx in gene_to_tx:
-      gene_id = self._c.execute("SELECT gene_id FROM genes WHERE name = ?", gene).fetchone()
-      tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = ?", tx).fetchone()
+      gene_id = self._c.execute("SELECT gene_id FROM genes WHERE name = ?", (gene,)).fetchone()
+      tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = ?", (tx,)).fetchone()
 
       if gene_id == None or \
          tx_id == None:
@@ -670,8 +674,8 @@ class VariantData(object):
     self._conn.commit()
 
     for protein, tx in protein_to_tx:
-      protein_id = self._c.execute("SELECT protein_id FROM proteins WHERE name = ?", protein).fetchone()
-      tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = ?", tx).fetchone()
+      protein_id = self._c.execute("SELECT protein_id FROM proteins WHERE name = ?", (protein,)).fetchone()
+      tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = ?", (tx,)).fetchone()
 
       if protein_id == None or \
          tx_id == None:
@@ -701,7 +705,7 @@ class VariantData(object):
       if l.startswith("#"):
         continue
 
-      l = l.strip().split("\t")
+      l = l.strip().split()
 
       chrom, pos = l[0].split(":")
       chrom = "chr%s" % chrom
@@ -835,7 +839,7 @@ class VariantData(object):
 
             self._c.execute("UPDATE alleles SET tgp_af = ?, polyphen_hdiv = ?, " \
               "polyphen_hvar = ?, mut_taster = ?, mut_assessor = ? " \
-              "WHERE allele_id = ?", (d_a["tgp_af"], max(d_a["pp_hdiv"]), max(d_a["pp_hvar"]),
+              "WHERE allele_id = ?", (d_a["tgp_af"], d_a["pp_hdiv"], d_a["pp_hvar"],
               d_a["mut_taster"], d_a["mut_assessor"], allele_id))
 
           if d_a["aaref"] != d_a["aaalt"] and \
@@ -843,7 +847,7 @@ class VariantData(object):
              d_a["aaalt"] != "." and \
              d_a["aapos"] != "-1":
             for tx, mutpos in zip(d_a["tx"], d_a["aapos"]):
-              tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = ?", tx).fetchone()
+              tx_id = self._c.execute("SELECT tx_id FROM transcripts WHERE name = ?", (tx,)).fetchone()
   
               if tx_id == None:
                 continue
@@ -950,12 +954,12 @@ class VariantData(object):
           dbnsfp[pos]["alleles"][l[3]]["tgp_af"] = None
 
         try:
-          dbnsfp[pos]["alleles"][l[3]]["pp_hdiv"] = float(l[22]).split(";")
+          dbnsfp[pos]["alleles"][l[3]]["pp_hdiv"] = max(map(float, l[22].split(";")))
         except ValueError:
           dbnsfp[pos]["alleles"][l[3]]["pp_hdiv"] = None
 
         try:
-          dbnsfp[pos]["alleles"][l[3]]["pp_hvar"] = float(l[24]).split(";")
+          dbnsfp[pos]["alleles"][l[3]]["pp_hvar"] = max(map(float, l[24].split(";")))
         except ValueError:
           dbnsfp[pos]["alleles"][l[3]]["pp_hvar"] = None
 
